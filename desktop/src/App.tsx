@@ -4,16 +4,18 @@ import {
     deleteNote,
     getHealth,
     getNote,
+    getSettings,
     listNotes,
     moveNote,
     runKnot,
     saveNote,
 } from "./api";
 import { HybridMarkdownEditor } from "./hybrid-editor";
-import type { KnotStatus, NoteDocument, NoteSummary } from "./types";
+import type { KnotDetailMode, KnotStatus, NoteDocument, NoteSummary, WorkspaceSettings } from "./types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import {
     ChevronLeft,
@@ -22,12 +24,12 @@ import {
     FolderClosed,
     FolderOpen,
     FolderPlus,
-    Pencil,
     Plus,
     Save,
     Search,
     Sparkles,
     Trash2,
+    X,
 } from "lucide-react";
 
 type SortMode = "recent" | "title" | "path";
@@ -37,6 +39,13 @@ type FolderRecord = {
     name: string;
     depth: number;
     noteCount: number;
+};
+
+type KnotFormState = {
+    outputFolder: string;
+    noteName: string;
+    title: string;
+    detailMode: KnotDetailMode;
 };
 
 const TREE_INDENTS = [
@@ -63,6 +72,25 @@ const STORAGE_KEYS = {
     expandedFolders: "knot.expandedFolders",
     virtualFolders: "knot.virtualFolders",
 } as const;
+
+const SORT_OPTIONS: { value: SortMode; label: string }[] = [
+    { value: "recent", label: "Recent" },
+    { value: "title", label: "Title" },
+    { value: "path", label: "Path" },
+];
+
+const DETAIL_OPTIONS: { value: KnotDetailMode; label: string; description: string }[] = [
+    {
+        value: "minimal",
+        label: "Minimal",
+        description: "Light cleanup with restrained formatting.",
+    },
+    {
+        value: "enriched",
+        label: "Enriched",
+        description: "Adds more structure and contextual polish.",
+    },
+];
 
 function treeIndentClass(depth: number): string {
     return TREE_INDENTS[Math.min(depth, TREE_INDENTS.length - 1)];
@@ -96,6 +124,24 @@ function folderFromPath(path: string): string {
 
 function summarizeTitle(note: NoteSummary | NoteDocument): string {
     return note.title?.trim() || stemFromPath(note.path) || "Untitled";
+}
+
+function normalizeDetailMode(value?: string): KnotDetailMode {
+    return value === "enriched" ? "enriched" : "minimal";
+}
+
+function defaultKnotFolder(path: string): string {
+    return `knot-${stemFromPath(normalizePath(path)) || "Untitled"}`;
+}
+
+function defaultKnotForm(note: NoteDocument, detailMode: KnotDetailMode): KnotFormState {
+    const normalizedPath = normalizePath(note.path);
+    return {
+        outputFolder: defaultKnotFolder(normalizedPath),
+        noteName: stemFromPath(normalizedPath) || "Untitled",
+        title: summarizeTitle({ ...note, path: normalizedPath }),
+        detailMode,
+    };
 }
 
 function formatTimestamp(value?: string | number): string {
@@ -223,6 +269,7 @@ export function App() {
     const [saving, setSaving] = useState(false);
     const [processing, setProcessing] = useState(false);
     const [statusMessage, setStatusMessage] = useState("");
+    const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings | null>(null);
     const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
         loadStoredValue<boolean>(STORAGE_KEYS.sidebarCollapsed, false),
     );
@@ -234,6 +281,8 @@ export function App() {
         loadStoredValue<string[]>(STORAGE_KEYS.virtualFolders, []),
     );
     const [search, setSearch] = useState("");
+    const [knotModalOpen, setKnotModalOpen] = useState(false);
+    const [knotForm, setKnotForm] = useState<KnotFormState>(() => defaultKnotForm(EMPTY_NOTE, "minimal"));
 
     const query = search.trim().toLowerCase();
     const isDirty = draft.content !== originalContent || normalizePath(draft.path) !== selectedPath;
@@ -362,20 +411,7 @@ export function App() {
     async function handleSave() {
         setSaving(true);
         try {
-            const hadSavedPath = Boolean(selectedPath);
-            const normalizedPath = normalizePath(draft.path);
-            const persistedPath = hadSavedPath ? await persistPathIfNeeded(normalizedPath) : normalizedPath;
-            const payload = {
-                path: persistedPath,
-                title: summarizeTitle({ ...draft, path: persistedPath }),
-                content: draft.content,
-            };
-            const saved = hadSavedPath ? await saveNote(payload) : await createNote(payload);
-            setDraft(saved);
-            setOriginalContent(saved.content);
-            setSelectedPath(saved.path);
-            setSelectedFolder(folderFromPath(saved.path));
-            ensureFolderExpanded(folderFromPath(saved.path));
+            await persistDraft();
             setStatusMessage("Saved");
             await refreshNotes();
         } catch (error) {
@@ -385,22 +421,52 @@ export function App() {
         }
     }
 
-    async function handleProcess() {
+    async function persistDraft(): Promise<NoteDocument> {
+        const hadSavedPath = Boolean(selectedPath);
+        const normalizedPath = normalizePath(draft.path);
+        const persistedPath = hadSavedPath ? await persistPathIfNeeded(normalizedPath) : normalizedPath;
+        const payload = {
+            path: persistedPath,
+            title: summarizeTitle({ ...draft, path: persistedPath }),
+            content: draft.content,
+        };
+        const saved = hadSavedPath ? await saveNote(payload) : await createNote(payload);
+        setDraft(saved);
+        setOriginalContent(saved.content);
+        setSelectedPath(saved.path);
+        setSelectedFolder(folderFromPath(saved.path));
+        ensureFolderExpanded(folderFromPath(saved.path));
+        return saved;
+    }
+
+    function openKnotModal() {
+        setKnotForm(defaultKnotForm(draft, normalizeDetailMode(workspaceSettings?.detailMode)));
+        setKnotModalOpen(true);
+    }
+
+    async function handleConfirmKnot() {
         setProcessing(true);
         try {
+            let sourceDocument = draft;
             const normalizedPath = normalizePath(draft.path);
-            const persistedPath = await persistPathIfNeeded(normalizedPath);
+            if (!selectedPath || isDirty || normalizedPath !== selectedPath) {
+                sourceDocument = await persistDraft();
+            }
+
             const payload = {
-                path: persistedPath,
-                title: summarizeTitle({ ...draft, path: persistedPath }),
-                content: draft.content,
+                path: normalizePath(sourceDocument.path),
+                title: knotForm.title.trim() || summarizeTitle(sourceDocument),
+                content: sourceDocument.content,
+                outputFolder: normalizeFolderPath(knotForm.outputFolder || defaultKnotFolder(sourceDocument.path)),
+                noteName: knotForm.noteName.trim() || stemFromPath(sourceDocument.path) || "Untitled",
+                detailMode: knotForm.detailMode,
             };
             const response = await runKnot(payload);
-            const nextPath = normalizePath(response.path ?? payload.path);
-            const nextContent = response.content ?? draft.content;
+            const nextPath = normalizePath(response.notePath ?? response.path ?? payload.path);
+            const nextContent = response.content ?? sourceDocument.content;
             setDraft({
                 path: nextPath,
-                title: response.title ?? summarizeTitle({ ...draft, path: nextPath }),
+                title: response.title ?? summarizeTitle({ ...sourceDocument, path: nextPath }),
                 content: nextContent,
                 updatedAt: response.updatedAt,
             });
@@ -409,6 +475,7 @@ export function App() {
             setSelectedFolder(folderFromPath(nextPath));
             ensureFolderExpanded(folderFromPath(nextPath));
             setStatusMessage(response.status ?? "Processed");
+            setKnotModalOpen(false);
             await refreshNotes();
         } catch (error) {
             setStatusMessage(error instanceof Error ? error.message : "Failed to process.");
@@ -441,36 +508,6 @@ export function App() {
         }
     }
 
-    async function handleRename(path: string) {
-        if (path === selectedPath && isDirty) {
-            const shouldSave = window.confirm("Save changes before renaming?");
-            if (!shouldSave) {
-                return;
-            }
-            await handleSave();
-        }
-
-        const nextPath = window.prompt("New path", path);
-        if (!nextPath) {
-            return;
-        }
-
-        try {
-            const moved = await moveNote(path, normalizePath(nextPath));
-            if (selectedPath === path) {
-                setSelectedPath(moved.path);
-                setSelectedFolder(folderFromPath(moved.path));
-                setDraft(moved);
-                setOriginalContent(moved.content);
-            }
-            ensureFolderExpanded(folderFromPath(moved.path));
-            setStatusMessage("Renamed");
-            await refreshNotes();
-        } catch (error) {
-            setStatusMessage(error instanceof Error ? error.message : "Failed to rename.");
-        }
-    }
-
     function handleCreateFolder() {
         const nextFolder = window.prompt("Folder path", selectedFolder || "notes");
         if (!nextFolder) {
@@ -490,6 +527,11 @@ export function App() {
     useEffect(() => {
         void (async () => {
             await refreshHealth();
+            try {
+                setWorkspaceSettings(await getSettings());
+            } catch {
+                setWorkspaceSettings(null);
+            }
             const items = await refreshNotes();
             if (items.length > 0) {
                 await openNote(items[0].path, { skipDirtyCheck: true });
@@ -642,15 +684,14 @@ export function App() {
                             <div className="space-y-3">
                                 <div className="flex items-center justify-between px-2 pt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">
                                     <span>Notes</span>
-                                    <select
+                                    <Select
                                         value={sortMode}
-                                        onChange={(event) => setSortMode(event.target.value as SortMode)}
-                                        className="rounded-lg border border-stone-800 bg-stone-950/80 px-2 py-1 text-[11px] uppercase tracking-[0.14em] text-stone-400 outline-none transition-colors focus:border-amber-300/50"
-                                    >
-                                        <option value="recent">Recent</option>
-                                        <option value="title">Title</option>
-                                        <option value="path">Path</option>
-                                    </select>
+                                        options={SORT_OPTIONS}
+                                        onChange={(nextValue) => setSortMode(nextValue)}
+                                        align="right"
+                                        buttonClassName="h-8 min-w-[7.25rem] rounded-lg border-stone-800 bg-stone-950/80 px-2.5 text-[11px] uppercase tracking-[0.14em] text-stone-400"
+                                        menuClassName="w-[10.5rem]"
+                                    />
                                 </div>
                                 {renderNoteTree()}
                             </div>
@@ -681,32 +722,18 @@ export function App() {
                             </div>
 
                             <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end lg:justify-end">
-                                <div className="min-w-0 flex-1 space-y-1.5 sm:min-w-[20rem] lg:max-w-md">
-                                    <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Path</label>
-                                    <Input
-                                        type="text"
-                                        value={draft.path}
-                                        onChange={(event) => updateDraftPath(event.target.value)}
-                                        placeholder="notes/filename.md"
-                                    />
-                                </div>
-
                                 <Button variant="outline" size="sm" onClick={() => void handleSave()} disabled={saving || loadingNote}>
                                     <Save size={14} />
                                     {saving ? "Saving..." : "Save"}
                                 </Button>
 
-                                <Button size="sm" onClick={() => void handleProcess()} disabled={processing || loadingNote}>
+                                <Button size="sm" onClick={openKnotModal} disabled={processing || loadingNote}>
                                     <Sparkles size={14} />
                                     {processing ? "Processing..." : "Knot"}
                                 </Button>
 
                                 {selectedPath && (
                                     <>
-                                        <Button variant="outline" size="sm" onClick={() => void handleRename(selectedPath)}>
-                                            <Pencil size={14} />
-                                            Rename
-                                        </Button>
                                         <Button variant="outline" size="sm" onClick={() => void handleDelete(selectedPath)}>
                                             <Trash2 size={14} />
                                             Delete
@@ -743,6 +770,106 @@ export function App() {
                     </div>
                 </div>
             </main>
+
+            {knotModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/80 px-4 backdrop-blur-sm">
+                    <div className="w-full max-w-xl rounded-[28px] border border-stone-800/80 bg-stone-950 p-6 shadow-[0_30px_120px_rgba(0,0,0,0.55)]">
+                        <div className="flex items-start justify-between gap-4">
+                            <div className="space-y-2">
+                                <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-stone-500">Knot Output</p>
+                                <h2 className="text-2xl font-semibold tracking-[-0.03em] text-stone-50">Configure this knot run</h2>
+                                <p className="text-sm leading-6 text-stone-400">
+                                    The raw note stays intact. Knot writes formatted output into a dedicated folder in your vault.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                className="inline-flex size-9 items-center justify-center rounded-xl border border-stone-800 bg-stone-950/80 text-stone-400 transition-colors hover:bg-stone-900 hover:text-stone-100"
+                                onClick={() => setKnotModalOpen(false)}
+                                aria-label="Close knot modal"
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+
+                        <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                            <div className="space-y-1.5 sm:col-span-2">
+                                <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Output Folder</label>
+                                <Input
+                                    value={knotForm.outputFolder}
+                                    onChange={(event) =>
+                                        setKnotForm((current) => ({
+                                            ...current,
+                                            outputFolder: event.target.value,
+                                        }))
+                                    }
+                                    placeholder={defaultKnotFolder(draft.path)}
+                                />
+                            </div>
+
+                            <div className="space-y-1.5">
+                                <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">File Name</label>
+                                <Input
+                                    value={knotForm.noteName}
+                                    onChange={(event) =>
+                                        setKnotForm((current) => ({
+                                            ...current,
+                                            noteName: event.target.value,
+                                        }))
+                                    }
+                                    placeholder={stemFromPath(draft.path)}
+                                />
+                            </div>
+
+                            <div className="space-y-1.5">
+                                <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Enrichment</label>
+                                <Select
+                                    value={knotForm.detailMode}
+                                    options={DETAIL_OPTIONS}
+                                    onChange={(nextValue) =>
+                                        setKnotForm((current) => ({
+                                            ...current,
+                                            detailMode: normalizeDetailMode(nextValue),
+                                        }))
+                                    }
+                                />
+                            </div>
+
+                            <div className="space-y-1.5 sm:col-span-2">
+                                <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Title</label>
+                                <Input
+                                    value={knotForm.title}
+                                    onChange={(event) =>
+                                        setKnotForm((current) => ({
+                                            ...current,
+                                            title: event.target.value,
+                                        }))
+                                    }
+                                    placeholder={summarizeTitle(draft)}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="mt-5 rounded-2xl border border-stone-800 bg-stone-900/60 px-4 py-3">
+                            <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Output Preview</p>
+                            <p className="mt-2 text-sm text-stone-200">
+                                {normalizeFolderPath(knotForm.outputFolder || defaultKnotFolder(draft.path))}/
+                                {(knotForm.noteName.trim() || stemFromPath(draft.path) || "Untitled").replace(/\.md$/i, "")}.md
+                            </p>
+                        </div>
+
+                        <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                            <Button variant="outline" onClick={() => setKnotModalOpen(false)} disabled={processing}>
+                                Cancel
+                            </Button>
+                            <Button onClick={() => void handleConfirmKnot()} disabled={processing || loadingNote}>
+                                <Sparkles size={14} />
+                                {processing ? "Knitting..." : "Run Knot"}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

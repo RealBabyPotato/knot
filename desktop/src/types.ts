@@ -17,12 +17,28 @@ export type KnotStatus = {
   message: string;
 };
 
+export type KnotDetailMode = "minimal" | "enriched";
+
+export type KnotProcessRequest = {
+  path: string;
+  title?: string;
+  content: string;
+  outputPath?: string;
+  outputFolder?: string;
+  noteName?: string;
+  detailMode?: KnotDetailMode;
+};
+
 export type ProcessResponse = {
+  mode?: string;
   path?: string;
+  notePath?: string;
   title?: string;
   content?: string;
   updatedAt?: string | number;
   status?: string;
+  relatedLinks?: string[];
+  outputFolder?: string;
 };
 
 export type WorkspaceSettings = {

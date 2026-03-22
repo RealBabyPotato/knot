@@ -1,4 +1,11 @@
-import type { KnotStatus, NoteDocument, NoteSummary, ProcessResponse, WorkspaceSettings } from "./types";
+import type {
+  KnotProcessRequest,
+  KnotStatus,
+  NoteDocument,
+  NoteSummary,
+  ProcessResponse,
+  WorkspaceSettings,
+} from "./types";
 
 const DEFAULT_API_URL = "http://127.0.0.1:7768";
 
@@ -77,6 +84,20 @@ function normalizeStatus(value: any): KnotStatus {
   };
 }
 
+function normalizeProcessResponse(value: any): ProcessResponse {
+  return {
+    mode: value.mode,
+    path: value.path ?? value.note_path,
+    notePath: value.note_path ?? value.path,
+    title: value.title,
+    content: value.content,
+    updatedAt: value.updatedAt ?? value.updated_at ?? value.modified_at,
+    status: value.status,
+    relatedLinks: Array.isArray(value.related_links) ? value.related_links : [],
+    outputFolder: value.output_folder ?? value.outputFolder,
+  };
+}
+
 export async function getHealth(): Promise<KnotStatus> {
   try {
     const response = await requestJson<unknown>("/health");
@@ -147,9 +168,19 @@ export async function moveNote(sourcePath: string, destinationPath: string): Pro
   return normalizeDocument(response, destinationPath);
 }
 
-export async function runKnot(document: Pick<NoteDocument, "path" | "title" | "content">): Promise<ProcessResponse> {
-  return requestJson<ProcessResponse>("/knot/process", {
+export async function runKnot(request: KnotProcessRequest): Promise<ProcessResponse> {
+  const response = await requestJson<any>("/knot/process", {
     method: "POST",
-    body: JSON.stringify(document),
+    body: JSON.stringify({
+      path: request.path,
+      title: request.title,
+      content: request.content,
+      output_path: request.outputPath,
+      output_folder: request.outputFolder,
+      note_name: request.noteName,
+      detail_mode: request.detailMode,
+    }),
   });
+
+  return normalizeProcessResponse(response);
 }

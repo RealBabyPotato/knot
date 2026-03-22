@@ -27,6 +27,7 @@ export function HybridMarkdownEditor({
   const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const lines = splitLines(value);
+  const isDocumentEmpty = value.trim().length === 0;
 
   useEffect(() => {
     if (activeLine > lines.length - 1) {
@@ -87,16 +88,26 @@ export function HybridMarkdownEditor({
   }
 
   return (
-    <div className="space-y-2">
+    <div
+      className="min-h-[60vh] cursor-text px-1 py-2"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          event.preventDefault();
+          focusLine(Math.max(0, lines.length - 1));
+        }
+      }}
+    >
       {lines.map((line, index) => {
         const isActive = focused && index === activeLine;
+        const isBlank = line.trim().length === 0;
+        const showEmptyPlaceholder = isBlank && isDocumentEmpty && index === 0 && !focused;
 
         return (
           <div
             key={`${index}-${line}`}
             className={cn(
-              "rounded-2xl border border-transparent bg-transparent px-4 py-2.5 transition-all duration-150",
-              isActive && "border-stone-700 bg-stone-900/80 shadow-[0_0_0_1px_rgba(245,158,11,0.12)]",
+              "min-h-7 px-3 py-0.5 text-[15px] leading-7 transition-colors duration-100",
+              isActive && "text-stone-100",
             )}
           >
             {isActive ? (
@@ -190,7 +201,13 @@ export function HybridMarkdownEditor({
                   focusLine(index);
                 }}
               >
-                <MarkdownLine markdown={line} placeholder={index === 0 ? placeholder : "Continue writing..."} />
+                {showEmptyPlaceholder ? (
+                  <span className="text-sm text-stone-500/80">{placeholder}</span>
+                ) : isBlank ? (
+                  <span className="block min-h-[1.75rem]">&nbsp;</span>
+                ) : (
+                  <MarkdownLine markdown={line} />
+                )}
               </button>
             )}
           </div>

@@ -1,23 +1,21 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
+    --font-sans: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
 }
 
 @layer base {
-  body {
-    background:
-      radial-gradient(circle at top left, rgb(251 191 36 / 0.12), transparent 28%),
-      linear-gradient(180deg, #09090b 0%, #0c0a09 100%);
-    color: rgb(250 250 249);
-    font-family: var(--font-sans);
-    font-feature-settings: "kern" 1, "liga" 1;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-  }
+    body {
+        background: black;
+        color: rgb(250 250 249);
+        font-family: var(--font-sans);
+        font-feature-settings: "kern" 1, "liga" 1;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
 
-  #root {
-    min-height: 100vh;
-  }
+    #root {
+        min-height: 100vh;
+    }
 }

@@ -1,83 +1,47 @@
-import * as React from "react"
-import { Slot } from "@radix-ui/react-slot"
+import * as React from "react";
+import { Slot } from "@radix-ui/react-slot";
+import { cn } from "@/lib/utils";
 
-export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  asChild?: boolean
-  variant?: "default" | "destructive" | "outline" | "secondary" | "ghost" | "link"
-  size?: "default" | "sm" | "lg" | "icon"
+export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  asChild?: boolean;
+  variant?: "default" | "destructive" | "outline" | "secondary" | "ghost" | "link";
+  size?: "default" | "sm" | "lg" | "icon";
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className = "", variant = "default", size = "default", asChild = false, style, ...props }, ref) => {
-    const Comp = asChild ? Slot : "button"
-    
-    const baseStyles: React.CSSProperties = {
-      display: "inline-flex",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: "8px",
-      whiteSpace: "nowrap",
-      borderRadius: "6px",
-      fontSize: "13px",
-      fontWeight: 500,
-      transition: "background 150ms, opacity 150ms",
-      cursor: "pointer",
-      border: "none",
-    }
-    
-    const variantStyles: Record<string, React.CSSProperties> = {
-      default: {
-        background: "var(--color-primary)",
-        color: "var(--color-primary-foreground)",
-      },
-      destructive: {
-        background: "var(--color-destructive)",
-        color: "var(--color-destructive-foreground)",
-      },
-      outline: {
-        background: "transparent",
-        border: "1px solid var(--color-border)",
-        color: "var(--color-foreground)",
-      },
-      secondary: {
-        background: "var(--color-secondary)",
-        color: "var(--color-secondary-foreground)",
-      },
-      ghost: {
-        background: "transparent",
-        color: "var(--color-foreground)",
-      },
-      link: {
-        background: "transparent",
-        color: "var(--color-primary)",
-        textDecoration: "underline",
-      },
-    }
-    
-    const sizeStyles: Record<string, React.CSSProperties> = {
-      default: { height: "36px", padding: "0 16px" },
-      sm: { height: "32px", padding: "0 12px", fontSize: "12px" },
-      lg: { height: "40px", padding: "0 24px" },
-      icon: { height: "36px", width: "36px", padding: 0 },
-    }
-    
-    const combinedStyle: React.CSSProperties = {
-      ...baseStyles,
-      ...variantStyles[variant],
-      ...sizeStyles[size],
-      ...style,
-    }
-    
+  ({ className, variant = "default", size = "default", asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button";
+
+    const variantClasses: Record<NonNullable<ButtonProps["variant"]>, string> = {
+      default: "border-transparent bg-amber-300 text-stone-950 shadow-sm hover:bg-amber-200",
+      destructive: "border-transparent bg-rose-500 text-white shadow-sm hover:bg-rose-400",
+      outline: "border-stone-700/80 bg-stone-950/70 text-stone-100 hover:bg-stone-900",
+      secondary: "border-transparent bg-stone-800 text-stone-100 hover:bg-stone-700",
+      ghost: "border-transparent bg-transparent text-stone-300 hover:bg-stone-900 hover:text-stone-100",
+      link: "border-transparent bg-transparent px-0 text-amber-300 underline-offset-4 hover:underline",
+    };
+
+    const sizeClasses: Record<NonNullable<ButtonProps["size"]>, string> = {
+      default: "h-10 px-4",
+      sm: "h-9 rounded-lg px-3 text-xs",
+      lg: "h-11 px-6 text-sm",
+      icon: "size-10",
+    };
+
     return (
       <Comp
-        style={combinedStyle}
         ref={ref}
+        className={cn(
+          "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-xl border text-sm font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-950 disabled:pointer-events-none disabled:opacity-50",
+          variantClasses[variant],
+          sizeClasses[size],
+          className,
+        )}
         {...props}
       />
-    )
-  }
-)
-Button.displayName = "Button"
+    );
+  },
+);
+Button.displayName = "Button";
 
-export { Button }
+export { Button };

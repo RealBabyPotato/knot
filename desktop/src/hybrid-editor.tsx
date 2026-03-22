@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { MarkdownLine } from "./markdown";
+import { cn } from "@/lib/utils";
 
 type HybridMarkdownEditorProps = {
   value: string;
@@ -86,108 +87,112 @@ export function HybridMarkdownEditor({
   }
 
   return (
-    <div className="hybrid-editor">
+    <div className="space-y-2">
       {lines.map((line, index) => {
         const isActive = focused && index === activeLine;
 
         return (
-          <div key={`${index}-${line}`} className={isActive ? "hybrid-line active" : "hybrid-line"}>
-            <div className="hybrid-line-body">
-              {isActive ? (
-                <textarea
-                  ref={inputRef}
-                  rows={1}
-                  className="hybrid-line-input"
-                  value={line}
-                  spellCheck={false}
-                  placeholder={placeholder}
-                  onBlur={() => {
-                    setFocused(false);
-                  }}
-                  onSelect={(event) => {
-                    setPreferredColumn(event.currentTarget.selectionStart);
-                  }}
-                  onChange={(event) => {
-                    updateValue(
-                      replaceActiveLine(lines, activeLine, event.target.value),
-                      activeLine,
-                      event.target.selectionStart,
-                    );
-                  }}
-                  onPaste={(event) => {
+          <div
+            key={`${index}-${line}`}
+            className={cn(
+              "rounded-2xl border border-transparent bg-transparent px-4 py-2.5 transition-all duration-150",
+              isActive && "border-stone-700 bg-stone-900/80 shadow-[0_0_0_1px_rgba(245,158,11,0.12)]",
+            )}
+          >
+            {isActive ? (
+              <textarea
+                ref={inputRef}
+                rows={1}
+                className="block min-h-[1.75rem] w-full resize-none border-0 bg-transparent p-0 text-[15px] leading-7 text-stone-100 outline-none placeholder:text-stone-500"
+                value={line}
+                spellCheck={false}
+                placeholder={placeholder}
+                onBlur={() => {
+                  setFocused(false);
+                }}
+                onSelect={(event) => {
+                  setPreferredColumn(event.currentTarget.selectionStart);
+                }}
+                onChange={(event) => {
+                  updateValue(
+                    replaceActiveLine(lines, activeLine, event.target.value),
+                    activeLine,
+                    event.target.selectionStart,
+                  );
+                }}
+                onPaste={(event) => {
+                  event.preventDefault();
+                  insertText(
+                    event.clipboardData.getData("text/plain"),
+                    event.currentTarget.selectionStart,
+                    event.currentTarget.selectionEnd,
+                  );
+                }}
+                onKeyDown={(event) => {
+                  const { selectionStart, selectionEnd, value: currentLine } = event.currentTarget;
+
+                  if (event.key === "Enter") {
                     event.preventDefault();
-                    insertText(
-                      event.clipboardData.getData("text/plain"),
-                      event.currentTarget.selectionStart,
-                      event.currentTarget.selectionEnd,
-                    );
-                  }}
-                  onKeyDown={(event) => {
-                    const { selectionStart, selectionEnd, value: currentLine } = event.currentTarget;
+                    const before = currentLine.slice(0, selectionStart);
+                    const after = currentLine.slice(selectionEnd);
+                    const nextLines = [...lines];
+                    nextLines.splice(activeLine, 1, before, after);
+                    updateValue(nextLines, activeLine + 1, 0);
+                    return;
+                  }
 
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      const before = currentLine.slice(0, selectionStart);
-                      const after = currentLine.slice(selectionEnd);
-                      const nextLines = [...lines];
-                      nextLines.splice(activeLine, 1, before, after);
-                      updateValue(nextLines, activeLine + 1, 0);
-                      return;
-                    }
+                  if (event.key === "Tab") {
+                    event.preventDefault();
+                    insertText("  ", selectionStart, selectionEnd);
+                    return;
+                  }
 
-                    if (event.key === "Tab") {
-                      event.preventDefault();
-                      insertText("  ", selectionStart, selectionEnd);
-                      return;
-                    }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    focusLine(Math.max(0, activeLine - 1), selectionStart);
+                    return;
+                  }
 
-                    if (event.key === "ArrowUp") {
-                      event.preventDefault();
-                      focusLine(Math.max(0, activeLine - 1), selectionStart);
-                      return;
-                    }
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    focusLine(Math.min(lines.length - 1, activeLine + 1), selectionStart);
+                    return;
+                  }
 
-                    if (event.key === "ArrowDown") {
-                      event.preventDefault();
-                      focusLine(Math.min(lines.length - 1, activeLine + 1), selectionStart);
-                      return;
-                    }
+                  if (event.key === "Backspace" && selectionStart === selectionEnd && selectionStart === 0 && activeLine > 0) {
+                    event.preventDefault();
+                    const previous = lines[activeLine - 1] ?? "";
+                    const nextLines = [...lines];
+                    nextLines.splice(activeLine - 1, 2, `${previous}${currentLine}`);
+                    updateValue(nextLines, activeLine - 1, previous.length);
+                    return;
+                  }
 
-                    if (event.key === "Backspace" && selectionStart === selectionEnd && selectionStart === 0 && activeLine > 0) {
-                      event.preventDefault();
-                      const previous = lines[activeLine - 1] ?? "";
-                      const nextLines = [...lines];
-                      nextLines.splice(activeLine - 1, 2, `${previous}${currentLine}`);
-                      updateValue(nextLines, activeLine - 1, previous.length);
-                      return;
-                    }
-
-                    if (
-                      event.key === "Delete" &&
-                      selectionStart === selectionEnd &&
-                      selectionStart === currentLine.length &&
-                      activeLine < lines.length - 1
-                    ) {
-                      event.preventDefault();
-                      const following = lines[activeLine + 1] ?? "";
-                      const nextLines = [...lines];
-                      nextLines.splice(activeLine, 2, `${currentLine}${following}`);
-                      updateValue(nextLines, activeLine, currentLine.length);
-                    }
-                  }}
-                />
-              ) : (
-                <button
-                  type="button"
-                  className="hybrid-line-preview"
-                  onClick={() => {
-                    focusLine(index);
-                  }}
-                >
-                  <MarkdownLine markdown={line} placeholder={index === 0 ? placeholder : "Continue writing..."} />
-                </button>
-              )}
-            </div>
+                  if (
+                    event.key === "Delete" &&
+                    selectionStart === selectionEnd &&
+                    selectionStart === currentLine.length &&
+                    activeLine < lines.length - 1
+                  ) {
+                    event.preventDefault();
+                    const following = lines[activeLine + 1] ?? "";
+                    const nextLines = [...lines];
+                    nextLines.splice(activeLine, 2, `${currentLine}${following}`);
+                    updateValue(nextLines, activeLine, currentLine.length);
+                  }
+                }}
+              />
+            ) : (
+              <button
+                type="button"
+                className="block w-full cursor-text border-0 bg-transparent p-0 text-left text-inherit"
+                onClick={() => {
+                  focusLine(index);
+                }}
+              >
+                <MarkdownLine markdown={line} placeholder={index === 0 ? placeholder : "Continue writing..."} />
+              </button>
+            )}
           </div>
         );
       })}

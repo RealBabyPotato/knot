@@ -761,7 +761,7 @@ export function App() {
                                 ) : (
                                     <button
                                         type="button"
-                                        className="inline-flex max-w-full items-center rounded-lg text-left text-2xl font-semibold tracking-[-0.03em] text-stone-50 transition-colors duration-150 hover:text-amber-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-950 md:text-3xl"
+                                        className="inline-flex max-w-full items-center rounded-lg hover:cursor-text text-left text-2xl font-semibold tracking-[-0.03em] text-stone-50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-950 md:text-3xl"
                                         onClick={beginTitleRename}
                                     >
                                         <span className="truncate">{summarizeTitle(draft)}</span>

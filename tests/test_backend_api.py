@@ -208,6 +208,23 @@ class BackendApiTests(unittest.TestCase):
             self.base_dir / "Vault" / "processed.md",
         )
 
+    def test_knot_process_defaults_to_named_output_folder(self) -> None:
+        response = self.client.post(
+            "/knot/process",
+            json={
+                "path": "Vault/source-note.md",
+                "content": "# Source Note\n\nfirst line",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["note_path"], "Vault/knot-source-note/source-note.md")
+        self.assertEqual(payload["output_folder"], "Vault/knot-source-note")
+        self.assertEqual(
+            self.processor.process_calls[0]["target_path"],
+            self.base_dir / "Vault" / "knot-source-note" / "source-note.md",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

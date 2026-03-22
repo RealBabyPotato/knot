@@ -26,6 +26,9 @@ def resolve_base_dir(base_dir: Path) -> Path:
 class NotePayload(BaseModel):
     path: str | None = Field(default=None, min_length=1)
     output_path: str | None = Field(default=None, min_length=1)
+    output_folder: str | None = Field(default=None, min_length=1)
+    note_name: str | None = Field(default=None, min_length=1)
+    detail_mode: str | None = None
     title: str | None = None
     content: str = ""
 
@@ -34,6 +37,9 @@ class NotePayload(BaseModel):
         if not candidate:
             raise HTTPException(status_code=400, detail="A note path is required.")
         return candidate
+
+    def source_reference(self) -> str:
+        return self.path or self.output_path or "Untitled.md"
 
 
 class MovePayload(BaseModel):
@@ -48,6 +54,25 @@ class ProcessResponse(BaseModel):
     content: str
     related_links: list[str] = Field(default_factory=list)
     status: str
+    output_folder: str
+
+
+def note_stem(value: str | None, fallback: str = "Untitled") -> str:
+    if not value:
+        return fallback
+
+    normalized = value.strip().replace("\\", "/").rstrip("/")
+    candidate = Path(normalized).name
+    if candidate.lower().endswith(".md"):
+        candidate = candidate[:-3]
+    return candidate or fallback
+
+
+def build_default_output_path(payload: NotePayload) -> str:
+    source_stem = note_stem(payload.source_reference())
+    folder_name = payload.output_folder.strip() if payload.output_folder else f"knot-{source_stem}"
+    note_name = note_stem(payload.note_name, fallback=source_stem)
+    return str(Path(folder_name) / f"{note_name}.md")
 
 
 class KnotWorkspace:
@@ -58,8 +83,13 @@ class KnotWorkspace:
     def settings(self) -> KnotSettings:
         return KnotSettings.from_base_dir(self.base_dir, provider="auto")
 
-    def processor(self) -> KnotProcessor:
-        return KnotProcessor(self.settings())
+    def processor(self, *, detail_mode: str | None = None) -> KnotProcessor:
+        settings = KnotSettings.from_base_dir(
+            self.base_dir,
+            provider="auto",
+            detail_mode=detail_mode,
+        )
+        return KnotProcessor(settings)
 
     def vault_dir(self) -> Path:
         return self.settings().vault_dir
@@ -192,19 +222,22 @@ class KnotWorkspace:
         return self.read_note(str(destination_path.relative_to(self.vault_dir())))
 
     def process_note(self, payload: NotePayload) -> ProcessResponse:
-        processor = self.processor()
+        processor = self.processor(detail_mode=payload.detail_mode)
         processor._assert_provider_credentials()
 
         raw_text = payload.content.strip()
         if not raw_text:
             raise HTTPException(status_code=400, detail="Cannot process an empty note.")
 
-        target_path = self.resolve_note_path(payload.resolved_path())
+        target_relative_path = payload.output_path or build_default_output_path(payload)
+        target_path = self.resolve_note_path(target_relative_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         previous_note = target_path.read_text(encoding="utf-8") if target_path.exists() else None
         note_title = processor.infer_note_title(raw_text, fallback=target_path.stem)
-        source_path = self.synthetic_source_path(payload.resolved_path())
+        if payload.title:
+            note_title = payload.title
+        source_path = self.synthetic_source_path(payload.source_reference())
 
         try:
             if previous_note is not None and previous_note.strip() != raw_text:
@@ -260,6 +293,7 @@ class KnotWorkspace:
             content=final_note,
             related_links=related_links,
             status=status,
+            output_folder=str(target_path.parent.relative_to(self.vault_dir())),
         )
 
 
@@ -385,22 +419,24 @@ class ProcessorWorkspace:
         return self.read_note(self.relative_note_path(destination_path))
 
     def process_note(self, payload: NotePayload) -> dict[str, Any]:
-        target_path = self.resolve_note_path(payload.resolved_path())
+        target_relative_path = payload.output_path or build_default_output_path(payload)
+        target_path = self.resolve_note_path(target_relative_path)
         result = self._processor.process_raw_text(
             payload.content,
-            source_path=self.synthetic_source_path(payload.resolved_path()),
+            source_path=self.synthetic_source_path(payload.source_reference()),
             target_path=target_path,
-            note_title=payload.title,
+            note_title=payload.title or payload.note_name,
         )
         content = target_path.read_text(encoding="utf-8")
         return {
             "mode": result.mode,
             "path": self.relative_note_path(result.note_path),
             "note_path": self.relative_note_path(result.note_path),
-            "title": payload.title or target_path.stem,
+            "title": payload.title or payload.note_name or target_path.stem,
             "content": content,
             "related_links": result.related_links,
             "status": f"Processed {target_path.name}.",
+            "output_folder": self.relative_note_path(target_path.parent),
         }
 
 

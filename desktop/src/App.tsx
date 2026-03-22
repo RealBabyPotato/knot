@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
     createNote,
     deleteNote,
@@ -73,24 +73,16 @@ const STORAGE_KEYS = {
     virtualFolders: "knot.virtualFolders",
 } as const;
 
-const SORT_OPTIONS: { value: SortMode; label: string }[] = [
+const SORT_OPTIONS = [
     { value: "recent", label: "Recent" },
     { value: "title", label: "Title" },
     { value: "path", label: "Path" },
-];
+] as const;
 
-const DETAIL_OPTIONS: { value: KnotDetailMode; label: string; description: string }[] = [
-    {
-        value: "minimal",
-        label: "Minimal",
-        description: "Light cleanup with restrained formatting.",
-    },
-    {
-        value: "enriched",
-        label: "Enriched",
-        description: "Adds more structure and contextual polish.",
-    },
-];
+const DETAIL_MODE_OPTIONS = [
+    { value: "minimal", label: "Minimal" },
+    { value: "enriched", label: "Enriched" },
+] as const;
 
 function treeIndentClass(depth: number): string {
     return TREE_INDENTS[Math.min(depth, TREE_INDENTS.length - 1)];
@@ -283,6 +275,9 @@ export function App() {
     const [search, setSearch] = useState("");
     const [knotModalOpen, setKnotModalOpen] = useState(false);
     const [knotForm, setKnotForm] = useState<KnotFormState>(() => defaultKnotForm(EMPTY_NOTE, "minimal"));
+    const [isRenamingTitle, setIsRenamingTitle] = useState(false);
+    const [pendingTitle, setPendingTitle] = useState("");
+    const titleInputRef = useRef<HTMLInputElement | null>(null);
 
     const query = search.trim().toLowerCase();
     const isDirty = draft.content !== originalContent || normalizePath(draft.path) !== selectedPath;
@@ -317,6 +312,15 @@ export function App() {
     useEffect(() => {
         window.localStorage.setItem(STORAGE_KEYS.virtualFolders, JSON.stringify(virtualFolders));
     }, [virtualFolders]);
+
+    useEffect(() => {
+        if (!isRenamingTitle) {
+            return;
+        }
+
+        titleInputRef.current?.focus();
+        titleInputRef.current?.select();
+    }, [isRenamingTitle]);
 
     async function refreshHealth() {
         setHealth(await getHealth());
@@ -373,6 +377,31 @@ export function App() {
         }));
         setSelectedFolder(folderFromPath(normalized));
         ensureFolderExpanded(folderFromPath(normalized));
+    }
+
+    function beginTitleRename() {
+        setPendingTitle(stemFromPath(draft.path));
+        setIsRenamingTitle(true);
+    }
+
+    function commitTitleRename() {
+        const trimmed = pendingTitle.trim();
+        setIsRenamingTitle(false);
+
+        if (!trimmed) {
+            setPendingTitle(stemFromPath(draft.path));
+            return;
+        }
+
+        const currentFolder = folderFromPath(draft.path);
+        const nextPath = currentFolder ? `${currentFolder}/${trimmed}.md` : `${trimmed}.md`;
+        updateDraftPath(nextPath);
+        setPendingTitle(trimmed);
+    }
+
+    function cancelTitleRename() {
+        setPendingTitle(stemFromPath(draft.path));
+        setIsRenamingTitle(false);
     }
 
     async function beginFreshNote(folderPath = selectedFolder) {
@@ -686,11 +715,10 @@ export function App() {
                                     <span>Notes</span>
                                     <Select
                                         value={sortMode}
-                                        options={SORT_OPTIONS}
-                                        onChange={(nextValue) => setSortMode(nextValue)}
-                                        align="right"
-                                        buttonClassName="h-8 min-w-[7.25rem] rounded-lg border-stone-800 bg-stone-950/80 px-2.5 text-[11px] uppercase tracking-[0.14em] text-stone-400"
-                                        menuClassName="w-[10.5rem]"
+                                        onValueChange={(nextValue) => setSortMode(nextValue as SortMode)}
+                                        options={[...SORT_OPTIONS]}
+                                        uiSize="sm"
+                                        className="w-auto min-w-[6.25rem] border-stone-800/90 bg-stone-950/85 text-stone-300"
                                     />
                                 </div>
                                 {renderNoteTree()}
@@ -710,9 +738,35 @@ export function App() {
                     <div className="border-b border-stone-800/80 bg-stone-950/55 px-4 py-4 backdrop-blur-xl md:px-8">
                         <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
                             <div className="space-y-2">
-                                <h1 className="text-2xl font-semibold tracking-[-0.03em] text-stone-50 md:text-3xl">
-                                    {summarizeTitle(draft)}
-                                </h1>
+                                {isRenamingTitle ? (
+                                    <Input
+                                        ref={titleInputRef}
+                                        value={pendingTitle}
+                                        onChange={(event) => setPendingTitle(event.target.value)}
+                                        onBlur={commitTitleRename}
+                                        onKeyDown={(event) => {
+                                            if (event.key === "Enter") {
+                                                event.preventDefault();
+                                                commitTitleRename();
+                                            }
+
+                                            if (event.key === "Escape") {
+                                                event.preventDefault();
+                                                cancelTitleRename();
+                                            }
+                                        }}
+                                        className="h-auto border-stone-700/70 bg-transparent px-0 py-0 text-2xl font-semibold tracking-[-0.03em] text-stone-50 shadow-none placeholder:text-stone-500 focus:border-transparent focus:ring-0 md:text-3xl"
+                                        aria-label="Rename note"
+                                    />
+                                ) : (
+                                    <button
+                                        type="button"
+                                        className="inline-flex max-w-full items-center rounded-lg text-left text-2xl font-semibold tracking-[-0.03em] text-stone-50 transition-colors duration-150 hover:text-amber-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-950 md:text-3xl"
+                                        onClick={beginTitleRename}
+                                    >
+                                        <span className="truncate">{summarizeTitle(draft)}</span>
+                                    </button>
+                                )}
                                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs uppercase tracking-[0.14em] text-stone-500">
                                     <span>{selectedFolder || "Root"}</span>
                                     <span>{wordCount(draft.content)} words</span>
@@ -825,13 +879,13 @@ export function App() {
                                 <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Enrichment</label>
                                 <Select
                                     value={knotForm.detailMode}
-                                    options={DETAIL_OPTIONS}
-                                    onChange={(nextValue) =>
+                                    onValueChange={(nextValue) =>
                                         setKnotForm((current) => ({
                                             ...current,
                                             detailMode: normalizeDetailMode(nextValue),
                                         }))
                                     }
+                                    options={[...DETAIL_MODE_OPTIONS]}
                                 />
                             </div>
 

@@ -1,4 +1,5 @@
 import ReactMarkdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,19 @@ export const markdownComponents = {
     <pre className="overflow-x-auto rounded-2xl border border-stone-800 bg-stone-950/90 px-4 py-3 text-sm text-stone-200">
       {children}
     </pre>
+  ),
+  details: ({ children }: any) => (
+    <details className="group rounded-2xl border border-stone-800/90 bg-stone-950/60 px-4 py-3 text-stone-200">
+      {children}
+    </details>
+  ),
+  summary: ({ children }: any) => (
+    <summary className="cursor-pointer list-none text-sm font-medium text-stone-100 marker:hidden transition-colors group-open:text-amber-200">
+      <span className="inline-flex items-center gap-2">
+        <span className="text-stone-500 transition-transform duration-200 group-open:rotate-90">›</span>
+        {children}
+      </span>
+    </summary>
   ),
   hr: () => <hr className="border-0 border-t border-stone-800/80" />,
   a: ({ href, children }: any) => (
@@ -52,7 +66,7 @@ export function MarkdownPreview({ markdown }: { markdown: string }) {
 
   return (
     <div className="space-y-4">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={markdownComponents}>
         {markdown}
       </ReactMarkdown>
     </div>
@@ -72,7 +86,7 @@ export function MarkdownLine({
 
   return (
     <div className="space-y-3">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={markdownComponents}>
         {markdown}
       </ReactMarkdown>
     </div>

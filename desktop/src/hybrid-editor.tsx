@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MarkdownLine } from "./markdown";
+import { MarkdownLine, MarkdownPreview } from "./markdown";
 import { cn } from "@/lib/utils";
 
 type HybridMarkdownEditorProps = {
@@ -17,6 +17,62 @@ function replaceActiveLine(lines: string[], index: number, nextLine: string): st
   return lines.map((line, lineIndex) => (lineIndex === index ? nextLine : line));
 }
 
+type RenderBlock =
+  | {
+      type: "line";
+      index: number;
+      line: string;
+    }
+  | {
+      type: "details";
+      start: number;
+      end: number;
+      markdown: string;
+    };
+
+function findDetailsBlockEnd(lines: string[], start: number): number | null {
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (lines[index]?.trim().startsWith("</details")) {
+      return index;
+    }
+  }
+  return null;
+}
+
+function buildRenderBlocks(lines: string[], activeLine: number, focused: boolean): RenderBlock[] {
+  const blocks: RenderBlock[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("<details")) {
+      const end = findDetailsBlockEnd(lines, index);
+      if (end !== null) {
+        const activeInside = focused && activeLine >= index && activeLine <= end;
+        if (!activeInside) {
+          blocks.push({
+            type: "details",
+            start: index,
+            end,
+            markdown: lines.slice(index, end + 1).join("\n"),
+          });
+          index = end;
+          continue;
+        }
+      }
+    }
+
+    blocks.push({
+      type: "line",
+      index,
+      line,
+    });
+  }
+
+  return blocks;
+}
+
 export function HybridMarkdownEditor({
   value,
   onChange,
@@ -28,6 +84,7 @@ export function HybridMarkdownEditor({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const lines = splitLines(value);
   const isDocumentEmpty = value.trim().length === 0;
+  const renderBlocks = buildRenderBlocks(lines, activeLine, focused);
 
   useEffect(() => {
     if (activeLine > lines.length - 1) {
@@ -97,7 +154,23 @@ export function HybridMarkdownEditor({
         }
       }}
     >
-      {lines.map((line, index) => {
+      {renderBlocks.map((block) => {
+        if (block.type === "details") {
+          return (
+            <button
+              key={`details-${block.start}-${block.end}`}
+              type="button"
+              className="block w-full cursor-text border-0 bg-transparent px-3 py-1 text-left text-inherit"
+              onClick={() => {
+                focusLine(block.start);
+              }}
+            >
+              <MarkdownPreview markdown={block.markdown} />
+            </button>
+          );
+        }
+
+        const { index, line } = block;
         const isActive = focused && index === activeLine;
         const isBlank = line.trim().length === 0;
         const showEmptyPlaceholder = isBlank && isDocumentEmpty && index === 0 && !focused;

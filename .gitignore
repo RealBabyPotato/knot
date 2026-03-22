@@ -3,8 +3,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+*.egg-info/
 .env
 .DS_Store
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
 
 data/chroma/*
 !data/chroma/.gitkeep

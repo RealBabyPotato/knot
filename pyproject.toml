@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knot"
+version = "0.1.0"
+description = "Local-first CLI for turning rough notes into linked vault notes."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer[all]>=0.12.3",
+    "python-dotenv>=1.0.1",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-chroma>=0.1.2",
+    "langchain-text-splitters>=0.3.0",
+    "chromadb>=0.5.5",
+]
+
+[project.scripts]
+knot = "main:app"
+
+[tool.setuptools]
+py-modules = ["main", "core", "prompts"]

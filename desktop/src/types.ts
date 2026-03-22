@@ -25,7 +25,6 @@ export type KnotProcessRequest = {
   content: string;
   outputPath?: string;
   outputFolder?: string;
-  noteName?: string;
   detailMode?: KnotDetailMode;
 };
 

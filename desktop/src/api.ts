@@ -18,6 +18,54 @@ function titleFromPath(path: string): string {
   return stem && stem.length > 0 ? stem : "Untitled";
 }
 
+class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+function extractErrorMessage(raw: string, status: number): string {
+  const text = raw.trim();
+  if (!text) {
+    return `Request failed with status ${status}`;
+  }
+
+  try {
+    const value = JSON.parse(text);
+    if (typeof value?.detail === "string" && value.detail.trim()) {
+      return value.detail;
+    }
+    if (typeof value?.message === "string" && value.message.trim()) {
+      return value.message;
+    }
+  } catch {
+    // FastAPI often returns JSON, but plain text is still a valid error body.
+  }
+
+  return text;
+}
+
+type RenameAttempt = {
+  path: string;
+  method: "POST" | "PATCH";
+};
+
+type RenameStrategy = RenameAttempt | "crud";
+
+const RENAME_ATTEMPTS: RenameAttempt[] = [
+  { path: "/notes/move", method: "POST" },
+  { path: "/notes/rename", method: "POST" },
+  { path: "/notes/rename", method: "PATCH" },
+  { path: "/notes/content/rename", method: "POST" },
+  { path: "/notes/content/rename", method: "PATCH" },
+];
+
+let renameStrategyPromise: Promise<RenameStrategy | null> | null = null;
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${getApiBaseUrl()}${path}`, {
     ...init,
@@ -29,7 +77,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `Request failed with status ${response.status}`);
+    throw new ApiError(extractErrorMessage(text, response.status), response.status);
   }
 
   if (response.status === 204) {
@@ -45,11 +93,48 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return text as T;
 }
 
+function sameRenameAttempt(left: RenameAttempt, right: RenameAttempt): boolean {
+  return left.path === right.path && left.method === right.method;
+}
+
+function isRenameAttempt(value: RenameStrategy | null): value is RenameAttempt {
+  return Boolean(value && value !== "crud");
+}
+
+async function detectRenameStrategy(): Promise<RenameStrategy | null> {
+  try {
+    const openapi = await requestJson<any>("/openapi.json");
+    const paths = openapi?.paths ?? {};
+
+    for (const attempt of RENAME_ATTEMPTS) {
+      const method = attempt.method.toLowerCase();
+      if (paths?.[attempt.path]?.[method]) {
+        return attempt;
+      }
+    }
+
+    return "crud";
+  } catch {
+    return null;
+  }
+}
+
+async function getRenameStrategy(): Promise<RenameStrategy | null> {
+  if (!renameStrategyPromise) {
+    renameStrategyPromise = detectRenameStrategy();
+  }
+  return renameStrategyPromise;
+}
+
+function resetRenameStrategy(): void {
+  renameStrategyPromise = null;
+}
+
 function normalizeSummary(value: any): NoteSummary {
   const path = String(value.path ?? value.note_path ?? value.filePath ?? "");
   return {
     path,
-    title: String(value.title ?? value.note_title ?? value.name ?? titleFromPath(path)),
+    title: titleFromPath(path),
     preview: value.preview ?? value.excerpt ?? value.content_preview,
     updatedAt: value.updatedAt ?? value.updated_at ?? value.modified_at,
   };
@@ -67,7 +152,7 @@ function normalizeDocument(value: any, fallbackPath = ""): NoteDocument {
   const path = String(value.path ?? value.note_path ?? fallbackPath);
   return {
     path,
-    title: String(value.title ?? value.note_title ?? titleFromPath(path)),
+    title: titleFromPath(path),
     content: String(value.content ?? value.markdown ?? value.body ?? ""),
     updatedAt: value.updatedAt ?? value.updated_at ?? value.modified_at,
   };
@@ -85,11 +170,12 @@ function normalizeStatus(value: any): KnotStatus {
 }
 
 function normalizeProcessResponse(value: any): ProcessResponse {
+  const path = String(value.path ?? value.note_path ?? "");
   return {
     mode: value.mode,
-    path: value.path ?? value.note_path,
-    notePath: value.note_path ?? value.path,
-    title: value.title,
+    path,
+    notePath: path,
+    title: titleFromPath(path),
     content: value.content,
     updatedAt: value.updatedAt ?? value.updated_at ?? value.modified_at,
     status: value.status,
@@ -156,16 +242,76 @@ export async function deleteNote(path: string): Promise<{ deleted: boolean; path
   });
 }
 
-export async function moveNote(sourcePath: string, destinationPath: string): Promise<NoteDocument> {
-  const response = await requestJson<any>("/notes/move", {
-    method: "POST",
-    body: JSON.stringify({
-      source_path: sourcePath,
-      destination_path: destinationPath,
-    }),
+async function requestRename(attempt: RenameAttempt, body: string, destinationPath: string): Promise<NoteDocument> {
+  const response = await requestJson<any>(attempt.path, {
+    method: attempt.method,
+    body,
+  });
+  return normalizeDocument(response, destinationPath);
+}
+
+async function moveNoteViaCrud(sourcePath: string, destinationPath: string): Promise<NoteDocument> {
+  const source = await getNote(sourcePath);
+  const created = await createNote({
+    path: destinationPath,
+    title: titleFromPath(destinationPath),
+    content: source.content,
   });
 
-  return normalizeDocument(response, destinationPath);
+  try {
+    await deleteNote(sourcePath);
+  } catch (error) {
+    try {
+      await deleteNote(destinationPath);
+    } catch {
+      // Best-effort rollback if the source delete fails after the new note is created.
+    }
+    throw error;
+  }
+
+  return created;
+}
+
+export async function moveNote(sourcePath: string, destinationPath: string): Promise<NoteDocument> {
+  const body = JSON.stringify({
+    source_path: sourcePath,
+    destination_path: destinationPath,
+    path: sourcePath,
+    new_path: destinationPath,
+  });
+
+  const preferredStrategy = await getRenameStrategy();
+  if (preferredStrategy === "crud") {
+    return moveNoteViaCrud(sourcePath, destinationPath);
+  }
+
+  const attempts = isRenameAttempt(preferredStrategy)
+    ? [preferredStrategy, ...RENAME_ATTEMPTS.filter((attempt) => !sameRenameAttempt(attempt, preferredStrategy))]
+    : RENAME_ATTEMPTS;
+
+  let lastError: unknown;
+  for (const attempt of attempts) {
+    try {
+      return await requestRename(attempt, body, destinationPath);
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof ApiError) || ![404, 405].includes(error.status)) {
+        throw error;
+      }
+    }
+  }
+
+  resetRenameStrategy();
+
+  try {
+    return await moveNoteViaCrud(sourcePath, destinationPath);
+  } catch (fallbackError) {
+    throw fallbackError instanceof Error
+      ? fallbackError
+      : lastError instanceof Error
+        ? lastError
+        : new Error("Rename endpoint not found.");
+  }
 }
 
 export async function runKnot(request: KnotProcessRequest): Promise<ProcessResponse> {
@@ -177,7 +323,6 @@ export async function runKnot(request: KnotProcessRequest): Promise<ProcessRespo
       content: request.content,
       output_path: request.outputPath,
       output_folder: request.outputFolder,
-      note_name: request.noteName,
       detail_mode: request.detailMode,
     }),
   });

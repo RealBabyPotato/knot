@@ -27,7 +27,6 @@ class NotePayload(BaseModel):
     path: str | None = Field(default=None, min_length=1)
     output_path: str | None = Field(default=None, min_length=1)
     output_folder: str | None = Field(default=None, min_length=1)
-    note_name: str | None = Field(default=None, min_length=1)
     detail_mode: str | None = None
     title: str | None = None
     content: str = ""
@@ -43,8 +42,33 @@ class NotePayload(BaseModel):
 
 
 class MovePayload(BaseModel):
-    source_path: str = Field(min_length=1)
-    destination_path: str = Field(min_length=1)
+    source_path: str | None = Field(default=None, min_length=1)
+    destination_path: str | None = Field(default=None, min_length=1)
+    path: str | None = Field(default=None, min_length=1)
+    new_path: str | None = Field(default=None, min_length=1)
+    target_path: str | None = Field(default=None, min_length=1)
+    new_name: str | None = Field(default=None, min_length=1)
+    title: str | None = Field(default=None, min_length=1)
+
+    def resolved_source_path(self) -> str:
+        candidate = self.source_path or self.path
+        if not candidate:
+            raise HTTPException(status_code=400, detail="A source note path is required.")
+        return candidate
+
+    def resolved_destination_path(self) -> str:
+        candidate = self.destination_path or self.new_path or self.target_path
+        if candidate:
+            return candidate
+
+        name = self.new_name or self.title
+        if not name:
+            raise HTTPException(status_code=400, detail="A destination note path is required.")
+
+        source = Path(self.resolved_source_path().strip().replace("\\", "/"))
+        if source.suffix.lower() == ".md":
+            source = source.with_suffix("")
+        return str(source.parent / f"{note_stem(name)}.md")
 
 
 class ProcessResponse(BaseModel):
@@ -71,8 +95,8 @@ def note_stem(value: str | None, fallback: str = "Untitled") -> str:
 def build_default_output_path(payload: NotePayload) -> str:
     source_stem = note_stem(payload.source_reference())
     folder_name = payload.output_folder.strip() if payload.output_folder else f"knot-{source_stem}"
-    note_name = note_stem(payload.note_name, fallback=source_stem)
-    return str(Path(folder_name) / f"{note_name}.md")
+    title = note_stem(payload.title, fallback=source_stem)
+    return str(Path(folder_name) / f"{title}.md")
 
 
 class KnotWorkspace:
@@ -141,7 +165,6 @@ class KnotWorkspace:
         ):
             content = note_path.read_text(encoding="utf-8")
             cleaned = processor.strip_raw_archives(processor.strip_related_notes(content)).strip()
-            title = processor.infer_note_title(content, fallback=note_path.stem)
             preview = ""
             for line in cleaned.splitlines():
                 stripped = line.strip()
@@ -153,7 +176,7 @@ class KnotWorkspace:
             items.append(
                 {
                     "path": str(note_path.relative_to(self.vault_dir())),
-                    "title": title,
+                    "title": note_path.stem,
                     "preview": processor.compact_excerpt(preview) if preview else "",
                     "updated_at": int(note_path.stat().st_mtime),
                 }
@@ -188,7 +211,7 @@ class KnotWorkspace:
 
         return {
             "path": str(note_path.relative_to(self.vault_dir())),
-            "title": payload.title or note_path.stem,
+            "title": note_path.stem,
             "content": content,
             "updated_at": int(note_path.stat().st_mtime),
         }
@@ -203,17 +226,19 @@ class KnotWorkspace:
         return {"deleted": True, "path": str(note_path.relative_to(self.vault_dir()))}
 
     def move_note(self, payload: MovePayload) -> dict[str, Any]:
-        source_path = self.resolve_note_path(payload.source_path)
-        destination_path = self.resolve_note_path(payload.destination_path)
+        source_reference = payload.resolved_source_path()
+        destination_reference = payload.resolved_destination_path()
+        source_path = self.resolve_note_path(source_reference)
+        destination_path = self.resolve_note_path(destination_reference)
 
         if not source_path.exists():
-            raise HTTPException(status_code=404, detail=f"Note not found: {payload.source_path}")
+            raise HTTPException(status_code=404, detail=f"Note not found: {source_reference}")
 
         if source_path == destination_path:
             return self.read_note(str(source_path.relative_to(self.vault_dir())))
 
         if destination_path.exists():
-            raise HTTPException(status_code=409, detail=f"Note already exists: {payload.destination_path}")
+            raise HTTPException(status_code=409, detail=f"Note already exists: {destination_reference}")
 
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.rename(destination_path)
@@ -234,9 +259,7 @@ class KnotWorkspace:
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         previous_note = target_path.read_text(encoding="utf-8") if target_path.exists() else None
-        note_title = processor.infer_note_title(raw_text, fallback=target_path.stem)
-        if payload.title:
-            note_title = payload.title
+        note_title = target_path.stem
         source_path = self.synthetic_source_path(payload.source_reference())
 
         try:
@@ -289,7 +312,7 @@ class KnotWorkspace:
         return ProcessResponse(
             mode=mode,
             path=str(target_path.relative_to(self.vault_dir())),
-            title=note_title,
+            title=target_path.stem,
             content=final_note,
             related_links=related_links,
             status=status,
@@ -355,7 +378,7 @@ class ProcessorWorkspace:
             items.append(
                 {
                     "path": self.relative_note_path(note_path),
-                    "title": self._processor.infer_note_title(content, fallback=note_path.stem),
+                    "title": note_path.stem,
                     "scope": "vault",
                     "modified_at": note_path.stat().st_mtime,
                     "size_bytes": note_path.stat().st_size,
@@ -369,10 +392,7 @@ class ProcessorWorkspace:
             raise HTTPException(status_code=404, detail=f"Note not found: {relative_path}")
         return {
             "path": self.relative_note_path(note_path),
-            "title": self._processor.infer_note_title(
-                note_path.read_text(encoding="utf-8"),
-                fallback=note_path.stem,
-            ),
+            "title": note_path.stem,
             "content": note_path.read_text(encoding="utf-8"),
             "updated_at": int(note_path.stat().st_mtime),
         }
@@ -388,7 +408,7 @@ class ProcessorWorkspace:
         self._processor.save_note(note_path, content, source_path=self.synthetic_source_path(payload.resolved_path()))
         return {
             "path": self.relative_note_path(note_path),
-            "title": payload.title or note_path.stem,
+            "title": note_path.stem,
             "content": content,
             "updated_at": int(note_path.stat().st_mtime),
         }
@@ -400,17 +420,19 @@ class ProcessorWorkspace:
         return {"deleted": True, "path": self.relative_note_path(note_path)}
 
     def move_note(self, payload: MovePayload) -> dict[str, Any]:
-        source_path = self.resolve_note_path(payload.source_path)
-        destination_path = self.resolve_note_path(payload.destination_path)
+        source_reference = payload.resolved_source_path()
+        destination_reference = payload.resolved_destination_path()
+        source_path = self.resolve_note_path(source_reference)
+        destination_path = self.resolve_note_path(destination_reference)
 
         if not source_path.exists():
-            raise HTTPException(status_code=404, detail=f"Note not found: {payload.source_path}")
+            raise HTTPException(status_code=404, detail=f"Note not found: {source_reference}")
 
         if source_path == destination_path:
             return self.read_note(self.relative_note_path(source_path))
 
         if destination_path.exists():
-            raise HTTPException(status_code=409, detail=f"Note already exists: {payload.destination_path}")
+            raise HTTPException(status_code=409, detail=f"Note already exists: {destination_reference}")
 
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.rename(destination_path)
@@ -425,14 +447,14 @@ class ProcessorWorkspace:
             payload.content,
             source_path=self.synthetic_source_path(payload.source_reference()),
             target_path=target_path,
-            note_title=payload.title or payload.note_name,
+            note_title=target_path.stem,
         )
         content = target_path.read_text(encoding="utf-8")
         return {
             "mode": result.mode,
             "path": self.relative_note_path(result.note_path),
             "note_path": self.relative_note_path(result.note_path),
-            "title": payload.title or payload.note_name or target_path.stem,
+            "title": target_path.stem,
             "content": content,
             "related_links": result.related_links,
             "status": f"Processed {target_path.name}.",
@@ -518,6 +540,13 @@ def create_app(
 
     @app.post("/notes/move")
     def move_note(payload: MovePayload) -> dict[str, Any]:
+        return backend.move_note(payload)
+
+    @app.post("/notes/rename")
+    @app.patch("/notes/rename")
+    @app.post("/notes/content/rename")
+    @app.patch("/notes/content/rename")
+    def rename_note(payload: MovePayload) -> dict[str, Any]:
         return backend.move_note(payload)
 
     @app.post("/notes")

@@ -32,7 +32,7 @@ import {
     X,
 } from "lucide-react";
 
-type SortMode = "recent" | "title" | "path";
+type SortMode = "recent" | "title";
 
 type FolderRecord = {
     path: string;
@@ -43,7 +43,6 @@ type FolderRecord = {
 
 type KnotFormState = {
     outputFolder: string;
-    noteName: string;
     title: string;
     detailMode: KnotDetailMode;
 };
@@ -76,7 +75,6 @@ const STORAGE_KEYS = {
 const SORT_OPTIONS = [
     { value: "recent", label: "Recent" },
     { value: "title", label: "Title" },
-    { value: "path", label: "Path" },
 ] as const;
 
 const DETAIL_MODE_OPTIONS = [
@@ -114,8 +112,22 @@ function folderFromPath(path: string): string {
     return parts.join("/");
 }
 
+function noteTitleFromPath(path: string): string {
+    return stemFromPath(normalizePath(path)) || "Untitled";
+}
+
+function noteStem(value: string, fallback = "Untitled"): string {
+    const candidate = value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const stem = candidate.split("/").pop()?.replace(/\.md$/i, "").trim();
+    return stem || fallback;
+}
+
 function summarizeTitle(note: NoteSummary | NoteDocument): string {
-    return note.title?.trim() || stemFromPath(note.path) || "Untitled";
+    return noteTitleFromPath(note.path);
+}
+
+function displayTitle(note: NoteSummary | NoteDocument): string {
+    return noteTitleFromPath(note.path);
 }
 
 function normalizeDetailMode(value?: string): KnotDetailMode {
@@ -130,8 +142,7 @@ function defaultKnotForm(note: NoteDocument, detailMode: KnotDetailMode): KnotFo
     const normalizedPath = normalizePath(note.path);
     return {
         outputFolder: defaultKnotFolder(normalizedPath),
-        noteName: stemFromPath(normalizedPath) || "Untitled",
-        title: summarizeTitle({ ...note, path: normalizedPath }),
+        title: noteTitleFromPath(normalizedPath),
         detailMode,
     };
 }
@@ -180,8 +191,8 @@ function sortNotes(notes: NoteSummary[], sortMode: SortMode): NoteSummary[] {
             }
         }
 
-        const leftKey = sortMode === "path" ? left.path.toLowerCase() : summarizeTitle(left).toLowerCase();
-        const rightKey = sortMode === "path" ? right.path.toLowerCase() : summarizeTitle(right).toLowerCase();
+        const leftKey = summarizeTitle(left).toLowerCase();
+        const rightKey = summarizeTitle(right).toLowerCase();
         return leftKey.localeCompare(rightKey);
     });
 
@@ -368,39 +379,70 @@ export function App() {
         setExpandedFolders([...next]);
     }
 
-    function updateDraftPath(nextPath: string) {
+    function updateDraftPath(nextPath: string, options?: { title?: string }) {
         const normalized = normalizePath(nextPath);
         setDraft((current) => ({
             ...current,
             path: normalized,
-            title: summarizeTitle({ ...current, path: normalized }),
+            title: options?.title ?? noteTitleFromPath(normalized),
         }));
         setSelectedFolder(folderFromPath(normalized));
         ensureFolderExpanded(folderFromPath(normalized));
     }
 
     function beginTitleRename() {
-        setPendingTitle(stemFromPath(draft.path));
+        setPendingTitle(displayTitle(draft));
         setIsRenamingTitle(true);
     }
 
-    function commitTitleRename() {
-        const trimmed = pendingTitle.trim();
+    async function commitTitleRename(nextValue = pendingTitle) {
+        const trimmed = nextValue.trim();
+        const previousPath = draft.path;
+        const previousTitle = displayTitle(draft);
         setIsRenamingTitle(false);
 
         if (!trimmed) {
-            setPendingTitle(stemFromPath(draft.path));
+            setPendingTitle(previousTitle);
             return;
         }
 
         const currentFolder = folderFromPath(draft.path);
         const nextPath = currentFolder ? `${currentFolder}/${trimmed}.md` : `${trimmed}.md`;
-        updateDraftPath(nextPath);
         setPendingTitle(trimmed);
+
+        if (normalizePath(nextPath) === normalizePath(previousPath) && trimmed === previousTitle) {
+            return;
+        }
+
+        updateDraftPath(nextPath, { title: trimmed });
+
+        if (!selectedPath) {
+            setStatusMessage("Filename updated");
+            return;
+        }
+
+        try {
+            const moved = await moveNote(selectedPath, normalizePath(nextPath));
+            setSelectedPath(moved.path);
+            setDraft((current) => ({
+                ...current,
+                path: moved.path,
+                title: noteTitleFromPath(moved.path),
+                updatedAt: moved.updatedAt,
+            }));
+            setSelectedFolder(folderFromPath(moved.path));
+            ensureFolderExpanded(folderFromPath(moved.path));
+            setStatusMessage("Renamed");
+            await refreshNotes();
+        } catch (error) {
+            updateDraftPath(previousPath, { title: previousTitle });
+            setPendingTitle(previousTitle);
+            setStatusMessage(error instanceof Error ? error.message : "Failed to rename.");
+        }
     }
 
     function cancelTitleRename() {
-        setPendingTitle(stemFromPath(draft.path));
+        setPendingTitle(displayTitle(draft));
         setIsRenamingTitle(false);
     }
 
@@ -430,7 +472,7 @@ export function App() {
         setDraft((current) => ({
             ...current,
             path: moved.path,
-            title: summarizeTitle(moved),
+            title: noteTitleFromPath(moved.path),
         }));
         setSelectedFolder(folderFromPath(moved.path));
         ensureFolderExpanded(folderFromPath(moved.path));
@@ -456,7 +498,7 @@ export function App() {
         const persistedPath = hadSavedPath ? await persistPathIfNeeded(normalizedPath) : normalizedPath;
         const payload = {
             path: persistedPath,
-            title: summarizeTitle({ ...draft, path: persistedPath }),
+            title: noteTitleFromPath(persistedPath),
             content: draft.content,
         };
         const saved = hadSavedPath ? await saveNote(payload) : await createNote(payload);
@@ -484,10 +526,9 @@ export function App() {
 
             const payload = {
                 path: normalizePath(sourceDocument.path),
-                title: knotForm.title.trim() || summarizeTitle(sourceDocument),
+                title: noteStem(knotForm.title, noteTitleFromPath(sourceDocument.path)),
                 content: sourceDocument.content,
                 outputFolder: normalizeFolderPath(knotForm.outputFolder || defaultKnotFolder(sourceDocument.path)),
-                noteName: knotForm.noteName.trim() || stemFromPath(sourceDocument.path) || "Untitled",
                 detailMode: knotForm.detailMode,
             };
             const response = await runKnot(payload);
@@ -495,7 +536,7 @@ export function App() {
             const nextContent = response.content ?? sourceDocument.content;
             setDraft({
                 path: nextPath,
-                title: response.title ?? summarizeTitle({ ...sourceDocument, path: nextPath }),
+                title: noteTitleFromPath(nextPath),
                 content: nextContent,
                 updatedAt: response.updatedAt,
             });
@@ -743,11 +784,11 @@ export function App() {
                                         ref={titleInputRef}
                                         value={pendingTitle}
                                         onChange={(event) => setPendingTitle(event.target.value)}
-                                        onBlur={commitTitleRename}
+                                        onBlur={() => void commitTitleRename()}
                                         onKeyDown={(event) => {
                                             if (event.key === "Enter") {
                                                 event.preventDefault();
-                                                commitTitleRename();
+                                                void commitTitleRename();
                                             }
 
                                             if (event.key === "Escape") {
@@ -764,7 +805,7 @@ export function App() {
                                         className="inline-flex max-w-full items-center rounded-lg hover:cursor-text text-left text-2xl font-semibold tracking-[-0.03em] text-stone-50 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-950 md:text-3xl"
                                         onClick={beginTitleRename}
                                     >
-                                        <span className="truncate">{summarizeTitle(draft)}</span>
+                                        <span className="truncate">{displayTitle(draft)}</span>
                                     </button>
                                 )}
                                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs uppercase tracking-[0.14em] text-stone-500">
@@ -862,20 +903,6 @@ export function App() {
                             </div>
 
                             <div className="space-y-1.5">
-                                <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">File Name</label>
-                                <Input
-                                    value={knotForm.noteName}
-                                    onChange={(event) =>
-                                        setKnotForm((current) => ({
-                                            ...current,
-                                            noteName: event.target.value,
-                                        }))
-                                    }
-                                    placeholder={stemFromPath(draft.path)}
-                                />
-                            </div>
-
-                            <div className="space-y-1.5">
                                 <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Enrichment</label>
                                 <Select
                                     value={knotForm.detailMode}
@@ -899,7 +926,7 @@ export function App() {
                                             title: event.target.value,
                                         }))
                                     }
-                                    placeholder={summarizeTitle(draft)}
+                                    placeholder={noteTitleFromPath(draft.path)}
                                 />
                             </div>
                         </div>
@@ -908,7 +935,7 @@ export function App() {
                             <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Output Preview</p>
                             <p className="mt-2 text-sm text-stone-200">
                                 {normalizeFolderPath(knotForm.outputFolder || defaultKnotFolder(draft.path))}/
-                                {(knotForm.noteName.trim() || stemFromPath(draft.path) || "Untitled").replace(/\.md$/i, "")}.md
+                                {noteStem(knotForm.title, noteTitleFromPath(draft.path))}.md
                             </p>
                         </div>
 

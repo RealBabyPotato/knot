@@ -188,6 +188,29 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(deleted.status_code, 200)
         self.assertTrue(deleted.json()["deleted"])
 
+    def test_rename_alias_accepts_title_payload(self) -> None:
+        created = self.client.post(
+            "/notes",
+            json={
+                "path": "Vault/notes/day-one.md",
+                "title": "Day One",
+                "content": "# Day One\n\nhello world",
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+
+        renamed = self.client.patch(
+            "/notes/rename",
+            json={
+                "path": "Vault/notes/day-one.md",
+                "title": "day-one-renamed",
+            },
+        )
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json()["path"], "Vault/notes/day-one-renamed.md")
+        self.assertFalse((self.base_dir / "Vault" / "notes" / "day-one.md").exists())
+        self.assertTrue((self.base_dir / "Vault" / "notes" / "day-one-renamed.md").exists())
+
     def test_manual_knot_process_can_write_to_target_path(self) -> None:
         response = self.client.post(
             "/knot/process",

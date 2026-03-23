@@ -40,9 +40,9 @@ type ActiveEditSpan = {
 
 type PreviewDrag = {
   anchorLine: number;
+  anchorColumn: number;
   currentLine: number;
-  selectionStart?: number;
-  selectionEnd?: number;
+  currentColumn: number;
 };
 
 function splitLines(value: string): string[] {
@@ -206,6 +206,14 @@ function selectionForPreviewLine(line: string, root: HTMLElement, clientX: numbe
   };
 }
 
+function pointerForDetailsBlock(lines: string[], block: DetailsBlock) {
+  const targetLine = block.summaryLine ?? block.startLine;
+  return {
+    line: targetLine,
+    column: summaryCaretColumn(lines[targetLine] ?? ""),
+  };
+}
+
 function summaryCaretColumn(line: string): number {
   const match = line.match(/<summary\b[^>]*>/i);
   if (!match) {
@@ -329,28 +337,21 @@ function shouldLetPreviewInteractionPass(event: MouseEvent | React.MouseEvent<HT
 function DetailsPreviewBlock({
   block,
   open,
-  selected,
   onBodyMouseDown,
-  onBodyMouseEnter,
   onPreviewClickCapture,
   onToggleOpen,
 }: {
   block: DetailsBlock;
   open: boolean;
-  selected: boolean;
   onBodyMouseDown: (event: React.MouseEvent<HTMLDivElement>) => void;
-  onBodyMouseEnter: () => void;
   onPreviewClickCapture: (event: React.MouseEvent<HTMLDivElement>) => void;
   onToggleOpen: () => void;
 }) {
   return (
     <div
-      className={cn(
-        "rounded-2xl border border-stone-800/90 bg-stone-950/60 px-4 py-3 transition-colors",
-        selected && "border-amber-300/40 bg-stone-900/85",
-      )}
+      data-editor-details-id={block.id}
+      className="rounded-2xl border border-stone-800/90 bg-stone-950/60 px-4 py-3 transition-colors"
       onMouseDown={onBodyMouseDown}
-      onMouseEnter={onBodyMouseEnter}
       onClickCapture={onPreviewClickCapture}
     >
       <div className="flex items-start gap-3">
@@ -401,10 +402,6 @@ export function HybridMarkdownEditor({
   const blocks = useMemo(() => buildRenderBlocks(lines), [lines]);
   const isDocumentEmpty = value.trim().length === 0;
 
-  const previewSelectionRange = previewDrag
-    ? expandRangeToBlockBoundaries(blocks, previewDrag.anchorLine, previewDrag.currentLine)
-    : null;
-
   useEffect(() => {
     if (!activeEditSpan) {
       return;
@@ -447,25 +444,94 @@ export function HybridMarkdownEditor({
       return;
     }
 
-    const { anchorLine, currentLine, selectionStart, selectionEnd } = previewDrag;
+    const { anchorLine, anchorColumn, currentLine } = previewDrag;
 
-    function handleWindowMouseUp() {
-      const rawRange = normalizeLineRange(anchorLine, currentLine);
-      const expandedRange = expandRangeToBlockBoundaries(blocks, anchorLine, currentLine);
-      activateEditSpan(expandedRange.startLine, expandedRange.endLine, {
-        selectAll: rawRange.startLine !== rawRange.endLine,
+    function resolvePointerPosition(clientX: number, clientY: number) {
+      const target = document.elementFromPoint(clientX, clientY);
+      if (!(target instanceof HTMLElement)) {
+        return null;
+      }
+
+      const lineRoot = target.closest<HTMLElement>("[data-editor-line-index]");
+      if (lineRoot) {
+        const lineIndex = Number(lineRoot.dataset.editorLineIndex);
+        if (Number.isFinite(lineIndex)) {
+          const selection = selectionForPreviewLine(lines[lineIndex] ?? "", lineRoot, clientX, clientY);
+          return {
+            line: lineIndex,
+            column: selection.start,
+          };
+        }
+      }
+
+      const detailsRoot = target.closest<HTMLElement>("[data-editor-details-id]");
+      if (detailsRoot) {
+        const detailsId = detailsRoot.dataset.editorDetailsId;
+        const detailsBlock = blocks.find((block): block is DetailsBlock => block.type === "details" && block.id === detailsId);
+        if (detailsBlock) {
+          return pointerForDetailsBlock(lines, detailsBlock);
+        }
+      }
+
+      const textarea = target.closest("textarea");
+      if (textarea === inputRef.current && activeEditSpan) {
+        const forward = currentLine >= anchorLine;
+        return {
+          line: forward ? activeEditSpan.endLine : activeEditSpan.startLine,
+          column: forward ? (lines[activeEditSpan.endLine] ?? "").length : 0,
+        };
+      }
+
+      return null;
+    }
+
+    function applyDragSelection(currentLine: number, currentColumn: number) {
+      const normalizedRange = normalizeLineRange(anchorLine, currentLine);
+      const forward = anchorLine <= currentLine;
+      const selectionStart = forward
+        ? lineOffsetWithinSpan(lines, normalizedRange.startLine, anchorLine, anchorColumn)
+        : lineOffsetWithinSpan(lines, normalizedRange.startLine, currentLine, currentColumn);
+      const selectionEnd = forward
+        ? lineOffsetWithinSpan(lines, normalizedRange.startLine, currentLine, currentColumn)
+        : lineOffsetWithinSpan(lines, normalizedRange.startLine, anchorLine, anchorColumn);
+
+      activateEditSpan(normalizedRange.startLine, normalizedRange.endLine, {
         selectionStart,
         selectionEnd,
       });
+    }
+
+    function handleWindowMouseMove(event: MouseEvent) {
+      const pointer = resolvePointerPosition(event.clientX, event.clientY);
+      if (!pointer) {
+        return;
+      }
+
+      setPreviewDrag((current) =>
+        current
+          ? {
+              ...current,
+              currentLine: pointer.line,
+              currentColumn: pointer.column,
+            }
+          : current,
+      );
+
+      applyDragSelection(pointer.line, pointer.column);
+    }
+
+    function handleWindowMouseUp() {
       setPreviewDrag(null);
     }
 
+    window.addEventListener("mousemove", handleWindowMouseMove);
     window.addEventListener("mouseup", handleWindowMouseUp);
 
     return () => {
+      window.removeEventListener("mousemove", handleWindowMouseMove);
       window.removeEventListener("mouseup", handleWindowMouseUp);
     };
-  }, [blocks, previewDrag, value]);
+  }, [activeEditSpan, blocks, lines, previewDrag, value]);
 
   function updateActiveSpan(nextText: string, selectionStart: number, selectionEnd: number) {
     if (!activeEditSpan) {
@@ -517,12 +583,23 @@ export function HybridMarkdownEditor({
     const expandedRange = expandRangeToBlockBoundaries(blocks, startLine, endLine);
     const spanText = lineSpanText(lines, expandedRange.startLine, expandedRange.endLine);
     const fallbackSelection = defaultSelectionForRange(expandedRange.startLine, expandedRange.endLine);
+    const selectionOffset = lineOffsetWithinSpan(lines, expandedRange.startLine, startLine, 0);
 
     setActiveEditSpan({
       startLine: expandedRange.startLine,
       endLine: expandedRange.endLine,
-      selectionStart: options?.selectAll ? 0 : Math.min(options?.selectionStart ?? fallbackSelection.selectionStart, spanText.length),
-      selectionEnd: options?.selectAll ? spanText.length : Math.min(options?.selectionEnd ?? fallbackSelection.selectionEnd, spanText.length),
+      selectionStart: options?.selectAll
+        ? 0
+        : Math.min(
+            options?.selectionStart !== undefined ? options.selectionStart + selectionOffset : fallbackSelection.selectionStart,
+            spanText.length,
+          ),
+      selectionEnd: options?.selectAll
+        ? spanText.length
+        : Math.min(
+            options?.selectionEnd !== undefined ? options.selectionEnd + selectionOffset : fallbackSelection.selectionEnd,
+            spanText.length,
+          ),
     });
   }
 
@@ -536,17 +613,23 @@ export function HybridMarkdownEditor({
     }
 
     event.preventDefault();
-    const anchorLine = block.type === "details" ? block.startLine : lineHint;
-    const nextSelection =
+    const pointer =
       block.type === "line"
-        ? selectionForPreviewLine(block.markdown, event.currentTarget, event.clientX, event.clientY)
-        : undefined;
+        ? {
+            line: lineHint,
+            column: selectionForPreviewLine(block.markdown, event.currentTarget, event.clientX, event.clientY).start,
+          }
+        : pointerForDetailsBlock(lines, block);
 
+    activateEditSpan(pointer.line, pointer.line, {
+      selectionStart: pointer.column,
+      selectionEnd: pointer.column,
+    });
     setPreviewDrag({
-      anchorLine,
-      currentLine: anchorLine,
-      selectionStart: nextSelection?.start,
-      selectionEnd: nextSelection?.end,
+      anchorLine: pointer.line,
+      anchorColumn: pointer.column,
+      currentLine: pointer.line,
+      currentColumn: pointer.column,
     });
   }
 
@@ -558,10 +641,6 @@ export function HybridMarkdownEditor({
     if (event.target instanceof HTMLElement && event.target.closest("a")) {
       event.preventDefault();
     }
-  }
-
-  function updatePreviewDrag(nextLine: number) {
-    setPreviewDrag((current) => (current ? { ...current, currentLine: nextLine } : current));
   }
 
   const activeText = activeEditSpan ? lineSpanText(lines, activeEditSpan.startLine, activeEditSpan.endLine) : "";
@@ -582,9 +661,6 @@ export function HybridMarkdownEditor({
         const isBeforeActive = activeEditSpan ? block.endLine < activeEditSpan.startLine : true;
         const isAfterActive = activeEditSpan ? block.startLine > activeEditSpan.endLine : true;
         const isInsideActive = activeEditSpan ? rangeIntersects(block, activeEditSpan.startLine, activeEditSpan.endLine) : false;
-        const isPreviewSelected = previewSelectionRange
-          ? rangeIntersects(block, previewSelectionRange.startLine, previewSelectionRange.endLine)
-          : false;
 
         if (activeEditSpan && isInsideActive && block.startLine === activeEditSpan.startLine) {
           return (
@@ -638,6 +714,28 @@ export function HybridMarkdownEditor({
                   }
 
                   if (
+                    event.key === "Backspace" &&
+                    selectionStart === selectionEnd &&
+                    currentValue.length === 0 &&
+                    activeEditSpan.startLine === activeEditSpan.endLine &&
+                    activeEditSpan.startLine > 0
+                  ) {
+                    event.preventDefault();
+                    const previousLineIndex = activeEditSpan.startLine - 1;
+                    const previousLine = lines[previousLineIndex] ?? "";
+                    const nextLines = [...lines];
+                    nextLines.splice(activeEditSpan.startLine, 1);
+                    onChange(nextLines.join("\n"));
+                    setActiveEditSpan({
+                      startLine: previousLineIndex,
+                      endLine: previousLineIndex,
+                      selectionStart: previousLine.length,
+                      selectionEnd: previousLine.length,
+                    });
+                    return;
+                  }
+
+                  if (
                     event.key === "ArrowUp" &&
                     selectionStart === selectionEnd &&
                     selectionStart === 0 &&
@@ -678,9 +776,7 @@ export function HybridMarkdownEditor({
               <DetailsPreviewBlock
                 block={block}
                 open={open}
-                selected={isPreviewSelected}
                 onBodyMouseDown={(event) => handlePreviewMouseDown(event, block)}
-                onBodyMouseEnter={() => updatePreviewDrag(block.endLine)}
                 onPreviewClickCapture={handlePreviewClickCapture}
                 onToggleOpen={() => {
                   setOpenDetailsBlocks((current) => ({
@@ -699,12 +795,9 @@ export function HybridMarkdownEditor({
         return (
           <div
             key={block.id}
-            className={cn(
-              "min-h-7 px-3 py-0.5 text-[15px] leading-7 transition-colors duration-100",
-              isPreviewSelected && "rounded-lg bg-stone-900/85",
-            )}
+            data-editor-line-index={block.startLine}
+            className="min-h-7 px-3 py-0.5 text-[15px] leading-7 transition-colors duration-100"
             onMouseDown={(event) => handlePreviewMouseDown(event, block, block.startLine)}
-            onMouseEnter={() => updatePreviewDrag(block.startLine)}
             onClickCapture={handlePreviewClickCapture}
           >
             {showEmptyPlaceholder ? (

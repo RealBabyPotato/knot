@@ -14,7 +14,13 @@ function getApiBaseUrl(): string {
 }
 
 function titleFromPath(path: string): string {
-  const stem = path.split("/").pop()?.replace(/\.md$/, "").trim();
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const parts = normalized.split("/");
+  const filename = parts[parts.length - 1]?.trim() ?? "";
+  if (filename.toLowerCase() === "index.md" && parts.length > 1) {
+    return parts[parts.length - 2] ?? "Untitled";
+  }
+  const stem = filename.replace(/\.md$/, "").trim();
   return stem && stem.length > 0 ? stem : "Untitled";
 }
 
@@ -181,6 +187,9 @@ function normalizeProcessResponse(value: any): ProcessResponse {
     status: value.status,
     relatedLinks: Array.isArray(value.related_links) ? value.related_links : [],
     outputFolder: value.output_folder ?? value.outputFolder,
+    rootNotePath: value.root_note_path ?? value.rootNotePath,
+    artifacts: Array.isArray(value.artifacts) ? value.artifacts : [],
+    treeSummary: value.tree_summary ?? value.treeSummary,
   };
 }
 
@@ -210,6 +219,7 @@ export async function getSettings(): Promise<WorkspaceSettings> {
     inboxDir: String(response.inbox_dir ?? response.inboxDir ?? ""),
     provider: String(response.provider ?? "unknown"),
     detailMode: String(response.detail_mode ?? response.detailMode ?? "minimal"),
+    outputMode: String(response.output_mode ?? response.outputMode ?? "single_note"),
   };
 }
 
@@ -324,6 +334,7 @@ export async function runKnot(request: KnotProcessRequest): Promise<ProcessRespo
       output_path: request.outputPath,
       output_folder: request.outputFolder,
       detail_mode: request.detailMode,
+      output_mode: request.outputMode,
     }),
   });
 

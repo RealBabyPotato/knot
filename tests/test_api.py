@@ -7,7 +7,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from api import KnotWorkspace, MovePayload, NotePayload
+from api import KnotWorkspace, MovePayload, NotePayload, build_default_output_folder
+from models import KnotSettings
 
 
 class ApiWorkspaceTests(unittest.TestCase):
@@ -112,6 +113,18 @@ class ApiWorkspaceTests(unittest.TestCase):
 
             with self.assertRaises(HTTPException):
                 workspace.resolve_note_path("../escape.md")
+
+    def test_build_default_output_folder_uses_named_folder(self) -> None:
+        payload = NotePayload(
+            path="MathLectures.md",
+            content="# Math Lectures",
+            output_mode="linked_tree",
+        )
+
+        self.assertEqual(build_default_output_folder(payload), "knot-MathLectures")
+
+    def test_output_mode_normalization_accepts_linked_tree_alias(self) -> None:
+        self.assertEqual(KnotSettings.normalize_output_mode("linked-tree"), "linked_tree")
 
 
 if __name__ == "__main__":

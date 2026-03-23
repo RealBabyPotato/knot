@@ -23,6 +23,7 @@ class FakeProcessor:
             chat_model="gpt-4o-mini",
             embedding_model="text-embedding-3-small",
             detail_mode="minimal",
+            output_mode="single_note",
             update_distance_threshold=0.35,
         )
         self.settings.inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -90,6 +91,7 @@ class FakeProcessor:
         source_path: Path | None = None,
         target_path: Path | None = None,
         note_title: str | None = None,
+        output_mode: str | None = None,
         status_callback=None,
     ) -> ProcessResult:
         self.process_calls.append(
@@ -98,8 +100,25 @@ class FakeProcessor:
                 "source_path": source_path,
                 "target_path": target_path,
                 "note_title": note_title,
+                "output_mode": output_mode,
             }
         )
+        if output_mode == "linked_tree":
+            if target_path is None:
+                target_path = self.settings.vault_dir / "processed" / "index.md"
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            child_path = target_path.parent / "Topic One.md"
+            child_path.write_text("# Topic One\n\nChild content\n", encoding="utf-8")
+            final_note = f"# {note_title or target_path.parent.name}\n\nOverview\n"
+            target_path.write_text(final_note, encoding="utf-8")
+            return ProcessResult(
+                mode="tree",
+                source_path=source_path or target_path,
+                note_path=target_path,
+                root_note_path=target_path,
+                artifacts=[target_path, child_path],
+                tree_summary={"created": 2, "updated": 0, "unchanged": 0},
+            )
         if target_path is None:
             target_path = self.settings.vault_dir / "processed.md"
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +266,29 @@ class BackendApiTests(unittest.TestCase):
             self.processor.process_calls[0]["target_path"],
             self.base_dir / "Vault" / "knot-source-note" / "source-note.md",
         )
+
+    def test_knot_process_can_create_linked_tree_output(self) -> None:
+        response = self.client.post(
+            "/knot/process",
+            json={
+                "path": "Vault/math-lectures.md",
+                "content": "# Math Lectures\n\nintegrals and derivatives",
+                "output_folder": "math-lectures",
+                "output_mode": "linked_tree",
+                "title": "MathLectures",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["mode"], "tree")
+        self.assertEqual(payload["root_note_path"], "Vault/math-lectures/index.md")
+        self.assertIn("Vault/math-lectures/Topic One.md", payload["artifacts"])
+        self.assertEqual(payload["tree_summary"]["created"], 2)
+        self.assertEqual(
+            self.processor.process_calls[0]["target_path"],
+            self.base_dir / "Vault" / "math-lectures" / "index.md",
+        )
+        self.assertEqual(self.processor.process_calls[0]["output_mode"], "linked_tree")
 
 
 if __name__ == "__main__":

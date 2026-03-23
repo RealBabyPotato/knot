@@ -41,6 +41,7 @@ def build_processor(
     update_threshold: float,
     output_dir: Path | None,
     detail_mode: str,
+    output_mode: str,
 ) -> KnotProcessor:
     base_dir = resolve_base_dir(base_dir)
     load_dotenv(base_dir / ".env", override=False)
@@ -51,6 +52,7 @@ def build_processor(
         update_distance_threshold=update_threshold,
         output_dir=output_dir,
         detail_mode=detail_mode,
+        output_mode=output_mode,
     )
     return KnotProcessor(settings)
 
@@ -84,6 +86,16 @@ def print_result(result: ProcessResult, *, base_dir: Path) -> None:
     relative_note_path = result.note_path.relative_to(base_dir)
     console.print(f"[green]{result.mode.upper()}[/green] {relative_note_path}")
     console.print(f"Output folder: {result.note_path.parent.relative_to(base_dir)}")
+
+    if result.root_note_path is not None:
+        console.print(f"Root note: {result.root_note_path.relative_to(base_dir)}")
+    if result.tree_summary is not None:
+        console.print(
+            "Tree summary: "
+            f"{result.tree_summary.get('created', 0)} created, "
+            f"{result.tree_summary.get('updated', 0)} updated, "
+            f"{result.tree_summary.get('unchanged', 0)} unchanged"
+        )
 
     if result.matched_note is not None and result.mode == "update":
         console.print(
@@ -136,6 +148,11 @@ def process(
         "--detail",
         help="Formatting depth: minimal or enriched. `none` and `medium` are also accepted.",
     ),
+    output_mode: str = typer.Option(
+        "single-note",
+        "--output-mode",
+        help="Output shape: single-note or linked-tree.",
+    ),
     no_spinner: bool = typer.Option(
         False,
         "--no-spinner",
@@ -150,6 +167,7 @@ def process(
         update_threshold=update_threshold,
         output_dir=output_dir,
         detail_mode=detail,
+        output_mode=output_mode,
     )
 
     try:

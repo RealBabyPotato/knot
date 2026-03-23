@@ -35,6 +35,7 @@ DiffOperation = Literal[
 NovelTokenClass = Literal["markdown_syntax", "section_label", "timestamp"]
 MergeDisposition = Literal["merged", "appended"]
 DetailMode = Literal["minimal", "enriched"]
+OutputMode = Literal["single_note", "linked_tree"]
 
 
 @dataclass(slots=True)
@@ -51,6 +52,7 @@ class KnotSettings:
     chunk_size: int = 1200
     chunk_overlap: int = 150
     detail_mode: DetailMode = "minimal"
+    output_mode: OutputMode = "single_note"
 
     @classmethod
     def from_base_dir(
@@ -62,6 +64,7 @@ class KnotSettings:
         update_distance_threshold: float | None = None,
         output_dir: Path | None = None,
         detail_mode: str | None = None,
+        output_mode: str | None = None,
     ) -> "KnotSettings":
         base_dir = base_dir.resolve()
         configured_provider = cls.configured_env("KNOT_PROVIDER")
@@ -80,6 +83,9 @@ class KnotSettings:
             resolved_output_dir = base_dir / resolved_output_dir
         resolved_detail_mode = cls.normalize_detail_mode(
             detail_mode or os.getenv("KNOT_DETAIL_MODE")
+        )
+        resolved_output_mode = cls.normalize_output_mode(
+            output_mode or os.getenv("KNOT_OUTPUT_MODE")
         )
 
         return cls(
@@ -100,6 +106,7 @@ class KnotSettings:
             if update_distance_threshold is not None
             else float(os.getenv("KNOT_UPDATE_DISTANCE_THRESHOLD", "0.35")),
             detail_mode=resolved_detail_mode,
+            output_mode=resolved_output_mode,
         )
 
     @staticmethod
@@ -159,6 +166,20 @@ class KnotSettings:
             "Unsupported detail mode. Use one of: minimal, enriched, none, medium."
         )
 
+    @staticmethod
+    def normalize_output_mode(output_mode: str | None) -> OutputMode:
+        if output_mode is None:
+            return "single_note"
+
+        normalized = output_mode.strip().lower().replace("-", "_")
+        if normalized in {"single", "single_note", "singlefile", "single_file"}:
+            return "single_note"
+        if normalized in {"tree", "linked_tree", "linked_folder", "folder"}:
+            return "linked_tree"
+        raise ValueError(
+            "Unsupported output mode. Use one of: single_note, linked_tree."
+        )
+
 
 @dataclass(slots=True)
 class NoteMatch:
@@ -175,6 +196,9 @@ class ProcessResult:
     note_path: Path
     related_links: list[str] = field(default_factory=list)
     matched_note: NoteMatch | None = None
+    root_note_path: Path | None = None
+    artifacts: list[Path] = field(default_factory=list)
+    tree_summary: dict[str, int] | None = None
 
 
 @dataclass(slots=True)
@@ -258,6 +282,23 @@ class AgentEnvelope:
     )
     output_blocks: list[OutputBlock] = field(default_factory=list)
     diff_ops: list[DiffOp] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TreeNodePlan:
+    node_key: str
+    title: str
+    parent_key: str | None = None
+    summary: str = ""
+    raw_basis: str = ""
+    cross_links: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TreeManifest:
+    tree_title: str
+    root_summary: str
+    nodes: list[TreeNodePlan] = field(default_factory=list)
     related_links: list[WikiLinkCandidate] = field(default_factory=list)
     merge_report: MergeReport | None = None
     raw_archive_text: str = ""

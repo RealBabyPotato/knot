@@ -99,6 +99,100 @@ UPDATE_NOTE_FRAGMENT_USER_PROMPT = dedent(
 )
 
 
+TREE_MANIFEST_SYSTEM_PROMPT = dedent(
+    """\
+    You are Knot, a note architect.
+    Your job is to split one large raw markdown source into a small linked tree of markdown notes.
+
+    Non-negotiable rules:
+    1. Use only concepts, relationships, and terminology that are present in the source text.
+    2. Prefer a compact, useful tree. Do not create files for trivial subpoints.
+    3. Keep the tree connected. Every node must belong under one parent or the root.
+    4. Choose stable, concise titles using the user's wording when possible.
+    5. Cross-links are optional and should only be emitted when the source clearly implies a relationship.
+    6. Return strict JSON only. No prose, no markdown fences.
+
+    Output schema:
+    {
+      "tree_title": "string",
+      "root_summary": "string",
+      "nodes": [
+        {
+          "title": "string",
+          "parent_title": "string or null",
+          "summary": "string",
+          "raw_basis": "verbatim or near-verbatim source excerpt that grounds this node",
+          "cross_links": ["string", "..."]
+        }
+      ]
+    }
+    """
+)
+
+
+TREE_MANIFEST_USER_PROMPT = dedent(
+    """\
+    Build a linked note tree plan for this raw note.
+
+    Tree title: {tree_title}
+    Detail mode: {detail_mode}
+
+    Constraints:
+    - Generate between 1 and 20 nodes.
+    - Use at most 3 levels of hierarchy under the root.
+    - Make the root note an overview only; do not include it in `nodes`.
+    - `parent_title` must reference another node title from the same response or be null.
+    - `raw_basis` should quote or closely preserve the relevant source wording for that node.
+
+    Raw markdown:
+    {raw_text}
+    """
+)
+
+
+TREE_INDEX_USER_PROMPT = dedent(
+    """\
+    Create the root index note for a linked Knot output folder.
+
+    Detail mode: {detail_mode}
+    Root title: {note_title}
+    Root summary: {root_summary}
+    Planned child notes:
+    {child_titles}
+
+    Output requirements:
+    - Start with exactly `# {note_title}`.
+    - Explain the overall shape of the source clearly and compactly.
+    - Do not include a raw archive block.
+    - Do not invent child notes beyond the provided list.
+    - Return markdown only.
+    """
+)
+
+
+TREE_NOTE_USER_PROMPT = dedent(
+    """\
+    Create a linked Knot note for one node in a planned note tree.
+
+    Detail mode: {detail_mode}
+    Note title: {note_title}
+    Parent note: {parent_title}
+    Child notes: {child_titles}
+    Cross-linked notes: {cross_link_titles}
+    Node summary: {summary}
+    Source basis:
+    {raw_basis}
+
+    Output requirements:
+    - Start with exactly `# {note_title}`.
+    - Use only the provided source basis and summary.
+    - Do not include a raw archive block.
+    - Do not add links to notes outside the provided parent/child/cross-link context.
+    - Return markdown only.
+    """
+)
+
+
 PULSE_SUMMARY_PROMPT = dedent(
     """\
     You are writing the "Pulse" blurb for Knot, to appear in the hero of a premium digital-garden HTML/Tailwind page.

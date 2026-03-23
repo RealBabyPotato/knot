@@ -45,6 +45,8 @@ type PreviewDrag = {
   currentColumn: number;
 };
 
+const EDITOR_LINE_HEIGHT_PX = 28;
+
 function splitLines(value: string): string[] {
   const parts = value.split("\n");
   return parts.length > 0 ? parts : [""];
@@ -78,6 +80,24 @@ function lineOffsetWithinSpan(lines: string[], spanStartLine: number, targetLine
   }
 
   return offset + column;
+}
+
+function offsetToLineColumn(value: string, offset: number): { line: number; column: number } {
+  const boundedOffset = Math.max(0, Math.min(offset, value.length));
+  const parts = splitLines(value);
+  let traversed = 0;
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const lineLength = (parts[index] ?? "").length;
+    const lineEnd = traversed + lineLength;
+    if (boundedOffset <= lineEnd) {
+      return { line: index, column: boundedOffset - traversed };
+    }
+    traversed = lineEnd + 1;
+  }
+
+  const lastLine = Math.max(0, parts.length - 1);
+  return { line: lastLine, column: parts[lastLine]?.length ?? 0 };
 }
 
 function leadingVisibleContentStart(source: string): number {
@@ -431,7 +451,7 @@ export function HybridMarkdownEditor({
     }
 
     input.style.height = "0px";
-    input.style.height = `${Math.max(44, input.scrollHeight)}px`;
+    input.style.height = `${Math.max(EDITOR_LINE_HEIGHT_PX, input.scrollHeight)}px`;
     input.focus();
 
     const start = Math.min(activeEditSpan.selectionStart, input.value.length);
@@ -547,6 +567,60 @@ export function HybridMarkdownEditor({
       endLine: activeEditSpan.startLine + nextParts.length - 1,
       selectionStart,
       selectionEnd,
+    });
+  }
+
+  function commitActiveSpan(
+    nextText: string,
+    nextSelectionStart: number,
+    nextSelectionEnd: number,
+    options?: {
+      collapseToCaretLine?: boolean;
+    },
+  ) {
+    if (!activeEditSpan) {
+      return;
+    }
+
+    const nextParts = splitLines(nextText);
+    const nextLines = [...lines];
+    nextLines.splice(activeEditSpan.startLine, activeEditSpan.endLine - activeEditSpan.startLine + 1, ...nextParts);
+    onChange(nextLines.join("\n"));
+
+    if (options?.collapseToCaretLine) {
+      const containingDetails = blocks.find(
+        (block) =>
+          block.type === "details" &&
+          block.startLine <= activeEditSpan.startLine &&
+          block.endLine >= activeEditSpan.endLine,
+      );
+
+      if (containingDetails) {
+        const nextRelativePosition = offsetToLineColumn(nextText, nextSelectionStart);
+        const nextAbsoluteLine = activeEditSpan.startLine + nextRelativePosition.line;
+        activateEditSpan(nextAbsoluteLine, nextAbsoluteLine, {
+          selectionStart: nextRelativePosition.column,
+          selectionEnd: nextRelativePosition.column,
+        });
+        return;
+      }
+
+      const nextRelativePosition = offsetToLineColumn(nextText, nextSelectionStart);
+      const nextAbsoluteLine = activeEditSpan.startLine + nextRelativePosition.line;
+      setActiveEditSpan({
+        startLine: nextAbsoluteLine,
+        endLine: nextAbsoluteLine,
+        selectionStart: nextRelativePosition.column,
+        selectionEnd: nextRelativePosition.column,
+      });
+      return;
+    }
+
+    setActiveEditSpan({
+      startLine: activeEditSpan.startLine,
+      endLine: activeEditSpan.startLine + nextParts.length - 1,
+      selectionStart: nextSelectionStart,
+      selectionEnd: nextSelectionEnd,
     });
   }
 
@@ -689,7 +763,7 @@ export function HybridMarkdownEditor({
                 }}
                 onChange={(event) => {
                   const { value: nextValue, selectionStart, selectionEnd } = event.currentTarget;
-                  updateActiveSpan(nextValue, selectionStart, selectionEnd);
+                  commitActiveSpan(nextValue, selectionStart, selectionEnd);
                 }}
                 onKeyDown={(event) => {
                   const { selectionStart, selectionEnd, value: currentValue } = event.currentTarget;
@@ -709,7 +783,17 @@ export function HybridMarkdownEditor({
                     event.preventDefault();
                     const nextValue = `${currentValue.slice(0, selectionStart)}  ${currentValue.slice(selectionEnd)}`;
                     const nextSelection = selectionStart + 2;
-                    updateActiveSpan(nextValue, nextSelection, nextSelection);
+                    commitActiveSpan(nextValue, nextSelection, nextSelection);
+                    return;
+                  }
+
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    const nextValue = `${currentValue.slice(0, selectionStart)}\n${currentValue.slice(selectionEnd)}`;
+                    const nextSelection = selectionStart + 1;
+                    commitActiveSpan(nextValue, nextSelection, nextSelection, {
+                      collapseToCaretLine: true,
+                    });
                     return;
                   }
 

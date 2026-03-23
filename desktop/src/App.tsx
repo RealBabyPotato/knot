@@ -11,7 +11,7 @@ import {
     saveNote,
 } from "./api";
 import { HybridMarkdownEditor } from "./hybrid-editor";
-import type { KnotDetailMode, KnotStatus, NoteDocument, NoteSummary, WorkspaceSettings } from "./types";
+import type { KnotDetailMode, KnotOutputMode, KnotStatus, NoteDocument, NoteSummary, WorkspaceSettings } from "./types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -45,6 +45,7 @@ type KnotFormState = {
     outputFolder: string;
     title: string;
     detailMode: KnotDetailMode;
+    outputMode: KnotOutputMode;
 };
 
 const TREE_INDENTS = [
@@ -82,6 +83,11 @@ const DETAIL_MODE_OPTIONS = [
     { value: "enriched", label: "Enriched" },
 ] as const;
 
+const OUTPUT_MODE_OPTIONS = [
+    { value: "single_note", label: "Single Note" },
+    { value: "linked_tree", label: "Linked Folder" },
+] as const;
+
 function treeIndentClass(depth: number): string {
     return TREE_INDENTS[Math.min(depth, TREE_INDENTS.length - 1)];
 }
@@ -113,7 +119,13 @@ function folderFromPath(path: string): string {
 }
 
 function noteTitleFromPath(path: string): string {
-    return stemFromPath(normalizePath(path)) || "Untitled";
+    const normalized = normalizePath(path);
+    const parts = normalized.split("/");
+    const filename = parts[parts.length - 1] ?? "";
+    if (filename.toLowerCase() === "index.md" && parts.length > 1) {
+        return parts[parts.length - 2] ?? "Untitled";
+    }
+    return stemFromPath(normalized) || "Untitled";
 }
 
 function noteStem(value: string, fallback = "Untitled"): string {
@@ -134,16 +146,25 @@ function normalizeDetailMode(value?: string): KnotDetailMode {
     return value === "enriched" ? "enriched" : "minimal";
 }
 
+function normalizeOutputMode(value?: string): KnotOutputMode {
+    return value === "linked_tree" ? "linked_tree" : "single_note";
+}
+
 function defaultKnotFolder(path: string): string {
     return `knot-${stemFromPath(normalizePath(path)) || "Untitled"}`;
 }
 
-function defaultKnotForm(note: NoteDocument, detailMode: KnotDetailMode): KnotFormState {
+function defaultKnotForm(
+    note: NoteDocument,
+    detailMode: KnotDetailMode,
+    outputMode: KnotOutputMode,
+): KnotFormState {
     const normalizedPath = normalizePath(note.path);
     return {
         outputFolder: defaultKnotFolder(normalizedPath),
         title: noteTitleFromPath(normalizedPath),
         detailMode,
+        outputMode,
     };
 }
 
@@ -285,7 +306,7 @@ export function App() {
     );
     const [search, setSearch] = useState("");
     const [knotModalOpen, setKnotModalOpen] = useState(false);
-    const [knotForm, setKnotForm] = useState<KnotFormState>(() => defaultKnotForm(EMPTY_NOTE, "minimal"));
+    const [knotForm, setKnotForm] = useState<KnotFormState>(() => defaultKnotForm(EMPTY_NOTE, "minimal", "single_note"));
     const [isRenamingTitle, setIsRenamingTitle] = useState(false);
     const [pendingTitle, setPendingTitle] = useState("");
     const titleInputRef = useRef<HTMLInputElement | null>(null);
@@ -570,7 +591,13 @@ export function App() {
     }
 
     function openKnotModal() {
-        setKnotForm(defaultKnotForm(draft, normalizeDetailMode(workspaceSettings?.detailMode)));
+        setKnotForm(
+            defaultKnotForm(
+                draft,
+                normalizeDetailMode(workspaceSettings?.detailMode),
+                normalizeOutputMode(workspaceSettings?.outputMode),
+            ),
+        );
         setKnotModalOpen(true);
     }
 
@@ -589,9 +616,10 @@ export function App() {
                 content: sourceDocument.content,
                 outputFolder: normalizeFolderPath(knotForm.outputFolder || defaultKnotFolder(sourceDocument.path)),
                 detailMode: knotForm.detailMode,
+                outputMode: knotForm.outputMode,
             };
             const response = await runKnot(payload);
-            const nextPath = normalizePath(response.notePath ?? response.path ?? payload.path);
+            const nextPath = normalizePath(response.rootNotePath ?? response.notePath ?? response.path ?? payload.path);
             const nextContent = response.content ?? sourceDocument.content;
             setDraftState({
                 path: nextPath,
@@ -603,7 +631,11 @@ export function App() {
             setSelectedPathState(nextPath);
             setSelectedFolder(folderFromPath(nextPath));
             ensureFolderExpanded(folderFromPath(nextPath));
-            setStatusMessage(response.status ?? "Processed");
+            const treeSummary = response.treeSummary;
+            const suffix = treeSummary
+                ? ` (${treeSummary.created} created, ${treeSummary.updated} updated, ${treeSummary.unchanged} unchanged)`
+                : "";
+            setStatusMessage(`${response.status ?? "Processed"}${suffix}`);
             setKnotModalOpen(false);
             await refreshNotes();
         } catch (error) {
@@ -963,6 +995,20 @@ export function App() {
                             </div>
 
                             <div className="space-y-1.5">
+                                <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Output Mode</label>
+                                <Select
+                                    value={knotForm.outputMode}
+                                    onValueChange={(nextValue) =>
+                                        setKnotForm((current) => ({
+                                            ...current,
+                                            outputMode: normalizeOutputMode(nextValue),
+                                        }))
+                                    }
+                                    options={[...OUTPUT_MODE_OPTIONS]}
+                                />
+                            </div>
+
+                            <div className="space-y-1.5">
                                 <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Enrichment</label>
                                 <Select
                                     value={knotForm.detailMode}
@@ -995,7 +1041,9 @@ export function App() {
                             <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-stone-500">Output Preview</p>
                             <p className="mt-2 text-sm text-stone-200">
                                 {normalizeFolderPath(knotForm.outputFolder || defaultKnotFolder(draft.path))}/
-                                {noteStem(knotForm.title, noteTitleFromPath(draft.path))}.md
+                                {knotForm.outputMode === "linked_tree"
+                                    ? "index.md"
+                                    : `${noteStem(knotForm.title, noteTitleFromPath(draft.path))}.md`}
                             </p>
                         </div>
 

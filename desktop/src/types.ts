@@ -18,6 +18,7 @@ export type KnotStatus = {
 };
 
 export type KnotDetailMode = "minimal" | "enriched";
+export type KnotOutputMode = "single_note" | "linked_tree";
 
 export type KnotProcessRequest = {
   path: string;
@@ -26,6 +27,7 @@ export type KnotProcessRequest = {
   outputPath?: string;
   outputFolder?: string;
   detailMode?: KnotDetailMode;
+  outputMode?: KnotOutputMode;
 };
 
 export type ProcessResponse = {
@@ -38,6 +40,13 @@ export type ProcessResponse = {
   status?: string;
   relatedLinks?: string[];
   outputFolder?: string;
+  rootNotePath?: string;
+  artifacts?: string[];
+  treeSummary?: {
+    created: number;
+    updated: number;
+    unchanged: number;
+  };
 };
 
 export type WorkspaceSettings = {
@@ -46,4 +55,5 @@ export type WorkspaceSettings = {
   inboxDir: string;
   provider: string;
   detailMode: string;
+  outputMode?: string;
 };

@@ -28,6 +28,7 @@ class NotePayload(BaseModel):
     output_path: str | None = Field(default=None, min_length=1)
     output_folder: str | None = Field(default=None, min_length=1)
     detail_mode: str | None = None
+    output_mode: str | None = None
     title: str | None = None
     content: str = ""
 
@@ -79,6 +80,9 @@ class ProcessResponse(BaseModel):
     related_links: list[str] = Field(default_factory=list)
     status: str
     output_folder: str
+    root_note_path: str | None = None
+    artifacts: list[str] = Field(default_factory=list)
+    tree_summary: dict[str, int] | None = None
 
 
 def note_stem(value: str | None, fallback: str = "Untitled") -> str:
@@ -99,6 +103,20 @@ def build_default_output_path(payload: NotePayload) -> str:
     return str(Path(folder_name) / f"{title}.md")
 
 
+def build_default_output_folder(payload: NotePayload) -> str:
+    source_stem = note_stem(payload.source_reference())
+    folder_name = payload.output_folder.strip() if payload.output_folder else f"knot-{source_stem}"
+    return str(Path(folder_name))
+
+
+def build_tree_root_path(payload: NotePayload) -> str:
+    if payload.output_path:
+        raw_path = Path(payload.output_path.strip())
+        folder = raw_path.parent if raw_path.suffix.lower() == ".md" else raw_path
+        return str(folder / "index.md")
+    return str(Path(build_default_output_folder(payload)) / "index.md")
+
+
 class KnotWorkspace:
     def __init__(self, base_dir: Path | None = None) -> None:
         self.base_dir = resolve_base_dir(base_dir or Path.cwd())
@@ -107,11 +125,17 @@ class KnotWorkspace:
     def settings(self) -> KnotSettings:
         return KnotSettings.from_base_dir(self.base_dir, provider="auto")
 
-    def processor(self, *, detail_mode: str | None = None) -> KnotProcessor:
+    def processor(
+        self,
+        *,
+        detail_mode: str | None = None,
+        output_mode: str | None = None,
+    ) -> KnotProcessor:
         settings = KnotSettings.from_base_dir(
             self.base_dir,
             provider="auto",
             detail_mode=detail_mode,
+            output_mode=output_mode,
         )
         return KnotProcessor(settings)
 
@@ -154,6 +178,20 @@ class KnotWorkspace:
             raw_path = raw_path.with_suffix(".md")
         return (self.base_dir / "Inbox" / raw_path).resolve()
 
+    def resolve_folder_path(self, relative_path: str) -> Path:
+        raw_path = Path(relative_path.strip())
+        if raw_path.is_absolute():
+            raise HTTPException(status_code=400, detail="Folder path must be relative.")
+
+        if raw_path.parts and raw_path.parts[0] == self.vault_dir().name:
+            raw_path = Path(*raw_path.parts[1:])
+
+        candidate = (self.vault_dir() / raw_path).resolve()
+        vault_dir = self.vault_dir().resolve()
+        if candidate != vault_dir and vault_dir not in candidate.parents:
+            raise HTTPException(status_code=400, detail="Folder path escapes the vault.")
+        return candidate
+
     def list_notes(self) -> list[dict[str, Any]]:
         processor = self.processor()
         items: list[dict[str, Any]] = []
@@ -164,7 +202,7 @@ class KnotWorkspace:
             reverse=True,
         ):
             content = note_path.read_text(encoding="utf-8")
-            cleaned = processor.strip_raw_archives(processor.strip_related_notes(content)).strip()
+            cleaned = processor.clean_indexable_text(content).strip()
             preview = ""
             for line in cleaned.splitlines():
                 stripped = line.strip()
@@ -247,76 +285,66 @@ class KnotWorkspace:
         return self.read_note(str(destination_path.relative_to(self.vault_dir())))
 
     def process_note(self, payload: NotePayload) -> ProcessResponse:
-        processor = self.processor(detail_mode=payload.detail_mode)
+        processor = self.processor(
+            detail_mode=payload.detail_mode,
+            output_mode=payload.output_mode,
+        )
         processor._assert_provider_credentials()
 
         raw_text = payload.content.strip()
         if not raw_text:
             raise HTTPException(status_code=400, detail="Cannot process an empty note.")
 
-        target_relative_path = payload.output_path or build_default_output_path(payload)
-        target_path = self.resolve_note_path(target_relative_path)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        previous_note = target_path.read_text(encoding="utf-8") if target_path.exists() else None
-        note_title = target_path.stem
         source_path = self.synthetic_source_path(payload.source_reference())
+        output_mode = KnotSettings.normalize_output_mode(payload.output_mode)
+
+        if output_mode == "linked_tree":
+            target_path = self.resolve_note_path(build_tree_root_path(payload))
+            note_title = note_stem(payload.title, fallback=note_stem(payload.source_reference()))
+        else:
+            target_relative_path = payload.output_path or build_default_output_path(payload)
+            target_path = self.resolve_note_path(target_relative_path)
+            note_title = target_path.stem
+            target_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            if previous_note is not None and previous_note.strip() != raw_text:
-                update_fragments = processor.render_update_fragments(previous_note, raw_text)
-                body_for_matching = processor.strip_related_notes(previous_note)
-                fragment_text = processor.strip_raw_archives("\n\n".join(update_fragments))
-                related_links = processor.related_links_for(
-                    f"{body_for_matching}\n\n{fragment_text}",
-                    exclude_path=target_path,
-                )
-                final_note, _merge_report = processor._merge_engine.merge(
-                    previous_note,
-                    update_fragments,
-                    related_links,
-                    raw_text,
-                    related_heading=processor.related_heading_label(),
-                )
-                mode = "update"
-                status = f"Merged new raw content into {target_path.name}."
-            else:
-                draft_note = processor.render_new_note(note_title, raw_text)
-                related_links = processor.related_links_for(
-                    processor.strip_raw_archives(draft_note),
-                    exclude_path=target_path,
-                )
-                final_note = processor.insert_related_notes_before_raw_archive(
-                    draft_note,
-                    related_links,
-                )
-                mode = "create" if previous_note is None else "format"
-                status = (
-                    f"Created {target_path.name} from raw Markdown."
-                    if previous_note is None
-                    else f"Formatted {target_path.name} in place."
-                )
-
-            final_note = final_note.rstrip() + "\n"
-            processor.write_note_atomically(target_path, final_note)
-            try:
-                processor.upsert_note(target_path, final_note, source_path=source_path)
-            except Exception:
-                processor.rollback_note_write(target_path, previous_note)
-                raise
+            result = processor.process_raw_text(
+                raw_text,
+                source_path=source_path,
+                target_path=target_path,
+                note_title=note_title,
+                output_mode=output_mode,
+            )
         except HTTPException:
             raise
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+        final_note = result.note_path.read_text(encoding="utf-8")
+        output_folder = result.root_note_path.parent if result.root_note_path else result.note_path.parent
+        status = (
+            f"Created linked folder {output_folder.name}."
+            if output_mode == "linked_tree"
+            else f"Processed {result.note_path.name}."
+        )
         return ProcessResponse(
-            mode=mode,
-            path=str(target_path.relative_to(self.vault_dir())),
-            title=target_path.stem,
+            mode=result.mode,
+            path=str(result.note_path.relative_to(self.vault_dir())),
+            title=result.note_path.stem,
             content=final_note,
-            related_links=related_links,
+            related_links=result.related_links,
             status=status,
-            output_folder=str(target_path.parent.relative_to(self.vault_dir())),
+            output_folder=str(output_folder.relative_to(self.vault_dir())),
+            root_note_path=(
+                str(result.root_note_path.relative_to(self.vault_dir()))
+                if result.root_note_path is not None
+                else None
+            ),
+            artifacts=[
+                str(path.relative_to(self.vault_dir()))
+                for path in result.artifacts
+            ],
+            tree_summary=result.tree_summary,
         )
 
 
@@ -369,6 +397,21 @@ class ProcessorWorkspace:
         if raw_path.suffix.lower() != ".md":
             raw_path = raw_path.with_suffix(".md")
         return self.base_dir / raw_path
+
+    def resolve_folder_path(self, relative_path: str) -> Path:
+        raw_path = Path(relative_path.strip())
+        if raw_path.is_absolute():
+            raise HTTPException(status_code=400, detail="Folder path must be relative.")
+
+        if raw_path.parts and raw_path.parts[0] not in {"Vault", "Inbox"}:
+            raw_path = Path("Vault") / raw_path
+
+        candidate = self.base_dir / raw_path
+        candidate_resolved = candidate.resolve()
+        base_resolved = self.base_dir.resolve()
+        if candidate_resolved != base_resolved and base_resolved not in candidate_resolved.parents:
+            raise HTTPException(status_code=400, detail="Folder path escapes the workspace.")
+        return candidate
 
     def list_notes(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -441,24 +484,44 @@ class ProcessorWorkspace:
         return self.read_note(self.relative_note_path(destination_path))
 
     def process_note(self, payload: NotePayload) -> dict[str, Any]:
-        target_relative_path = payload.output_path or build_default_output_path(payload)
-        target_path = self.resolve_note_path(target_relative_path)
+        output_mode = KnotSettings.normalize_output_mode(payload.output_mode)
+        if output_mode == "linked_tree":
+            target_path = self.resolve_note_path(build_tree_root_path(payload))
+            note_title = note_stem(payload.title, fallback=note_stem(payload.source_reference()))
+        else:
+            target_relative_path = payload.output_path or build_default_output_path(payload)
+            target_path = self.resolve_note_path(target_relative_path)
+            note_title = target_path.stem
+
         result = self._processor.process_raw_text(
             payload.content,
             source_path=self.synthetic_source_path(payload.source_reference()),
             target_path=target_path,
-            note_title=target_path.stem,
+            note_title=note_title,
+            output_mode=output_mode,
         )
-        content = target_path.read_text(encoding="utf-8")
+        content = result.note_path.read_text(encoding="utf-8")
+        output_folder = result.root_note_path.parent if result.root_note_path else result.note_path.parent
         return {
             "mode": result.mode,
             "path": self.relative_note_path(result.note_path),
             "note_path": self.relative_note_path(result.note_path),
-            "title": target_path.stem,
+            "title": result.note_path.stem,
             "content": content,
             "related_links": result.related_links,
-            "status": f"Processed {target_path.name}.",
-            "output_folder": self.relative_note_path(target_path.parent),
+            "status": (
+                f"Created linked folder {output_folder.name}."
+                if output_mode == "linked_tree"
+                else f"Processed {result.note_path.name}."
+            ),
+            "output_folder": self.relative_note_path(output_folder),
+            "root_note_path": (
+                self.relative_note_path(result.root_note_path)
+                if result.root_note_path is not None
+                else None
+            ),
+            "artifacts": [self.relative_note_path(path) for path in result.artifacts],
+            "tree_summary": result.tree_summary,
         }
 
 
@@ -520,6 +583,7 @@ def create_app(
             "inbox_dir": str(getattr(current, "inbox_dir", backend.base_dir / "Inbox")),
             "provider": getattr(current, "provider", "unknown"),
             "detail_mode": getattr(current, "detail_mode", "minimal"),
+            "output_mode": getattr(current, "output_mode", "single_note"),
         }
 
     @app.get("/notes")

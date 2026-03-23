@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { MarkdownLine, MarkdownPreview } from "./markdown";
 import { cn } from "@/lib/utils";
 
@@ -8,45 +9,46 @@ type HybridMarkdownEditorProps = {
   placeholder?: string;
 };
 
+type LineBlock = {
+  type: "line";
+  id: string;
+  startLine: number;
+  endLine: number;
+  markdown: string;
+};
+
+type DetailsBlock = {
+  type: "details";
+  id: string;
+  startLine: number;
+  endLine: number;
+  markdown: string;
+  summaryLine: number | null;
+  summaryMarkdown: string;
+  bodyMarkdown: string;
+  defaultOpen: boolean;
+};
+
+type RenderBlock = LineBlock | DetailsBlock;
+
+type ActiveEditSpan = {
+  startLine: number;
+  endLine: number;
+  selectionStart: number;
+  selectionEnd: number;
+};
+
+type PreviewDrag = {
+  anchorLine: number;
+  currentLine: number;
+  selectionStart?: number;
+  selectionEnd?: number;
+};
+
 function splitLines(value: string): string[] {
   const parts = value.split("\n");
   return parts.length > 0 ? parts : [""];
 }
-
-function replaceActiveLine(lines: string[], index: number, nextLine: string): string[] {
-  return lines.map((line, lineIndex) => (lineIndex === index ? nextLine : line));
-}
-
-function offsetToLineColumn(value: string, offset: number): { line: number; column: number } {
-  const boundedOffset = Math.max(0, Math.min(offset, value.length));
-  const lines = splitLines(value);
-  let traversed = 0;
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const lineLength = (lines[index] ?? "").length;
-    const lineEnd = traversed + lineLength;
-    if (boundedOffset <= lineEnd) {
-      return { line: index, column: boundedOffset - traversed };
-    }
-    traversed = lineEnd + 1;
-  }
-
-  const lastLine = Math.max(0, lines.length - 1);
-  return { line: lastLine, column: lines[lastLine]?.length ?? 0 };
-}
-
-type RenderBlock =
-  | {
-      type: "line";
-      index: number;
-      line: string;
-    }
-  | {
-      type: "details";
-      start: number;
-      end: number;
-      markdown: string;
-    };
 
 function findDetailsBlockEnd(lines: string[], start: number): number | null {
   for (let index = start + 1; index < lines.length; index += 1) {
@@ -57,7 +59,230 @@ function findDetailsBlockEnd(lines: string[], start: number): number | null {
   return null;
 }
 
-function buildRenderBlocks(lines: string[], activeLine: number, focused: boolean): RenderBlock[] {
+function normalizeLineRange(startLine: number, endLine: number) {
+  return {
+    startLine: Math.min(startLine, endLine),
+    endLine: Math.max(startLine, endLine),
+  };
+}
+
+function lineSpanText(lines: string[], startLine: number, endLine: number): string {
+  return lines.slice(startLine, endLine + 1).join("\n");
+}
+
+function lineOffsetWithinSpan(lines: string[], spanStartLine: number, targetLine: number, column = 0): number {
+  let offset = 0;
+
+  for (let index = spanStartLine; index < targetLine; index += 1) {
+    offset += (lines[index] ?? "").length + 1;
+  }
+
+  return offset + column;
+}
+
+function leadingVisibleContentStart(source: string): number {
+  const patterns = [
+    /^\s{0,3}#{1,6}\s+/,
+    /^\s{0,3}>\s+/,
+    /^\s{0,3}(?:[-*+]\s+\[[ xX]\]\s+)/,
+    /^\s{0,3}(?:[-*+]\s+)/,
+    /^\s{0,3}\d+\.\s+/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = source.match(pattern);
+    if (match) {
+      return match[0].length;
+    }
+  }
+
+  return 0;
+}
+
+function textOffsetWithinElement(root: HTMLElement, node: Node, offset: number): number | null {
+  if (!root.contains(node)) {
+    return null;
+  }
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let traversed = 0;
+  let current: Node | null = walker.nextNode();
+
+  while (current) {
+    const textLength = current.textContent?.length ?? 0;
+    if (current === node) {
+      return traversed + Math.min(offset, textLength);
+    }
+
+    traversed += textLength;
+    current = walker.nextNode();
+  }
+
+  return traversed;
+}
+
+function visibleTextOffsetFromPoint(root: HTMLElement, clientX: number, clientY: number): number | null {
+  const documentWithCaret = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offset: number; offsetNode: Node } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+
+  const caretPosition = documentWithCaret.caretPositionFromPoint?.(clientX, clientY);
+  if (caretPosition) {
+    return textOffsetWithinElement(root, caretPosition.offsetNode, caretPosition.offset);
+  }
+
+  const caretRange = documentWithCaret.caretRangeFromPoint?.(clientX, clientY);
+  if (caretRange) {
+    return textOffsetWithinElement(root, caretRange.startContainer, caretRange.startOffset);
+  }
+
+  return null;
+}
+
+function sourceColumnFromVisibleOffset(source: string, visibleOffset: number): number {
+  let rawIndex = leadingVisibleContentStart(source);
+  let visibleIndex = 0;
+
+  while (rawIndex < source.length) {
+    if (visibleIndex >= visibleOffset) {
+      return rawIndex;
+    }
+
+    if (source[rawIndex] === "<") {
+      const tagEnd = source.indexOf(">", rawIndex);
+      if (tagEnd === -1) {
+        break;
+      }
+      rawIndex = tagEnd + 1;
+      continue;
+    }
+
+    if (source[rawIndex] === "[" && source.indexOf("](", rawIndex) !== -1) {
+      const closeBracket = source.indexOf("](", rawIndex);
+      const closeParen = closeBracket !== -1 ? source.indexOf(")", closeBracket + 2) : -1;
+
+      if (closeBracket !== -1 && closeParen !== -1) {
+        const linkTextLength = closeBracket - rawIndex - 1;
+        if (visibleIndex + linkTextLength >= visibleOffset) {
+          return rawIndex + 1 + Math.max(0, visibleOffset - visibleIndex);
+        }
+        visibleIndex += linkTextLength;
+        rawIndex = closeParen + 1;
+        continue;
+      }
+    }
+
+    if ("*_~`".includes(source[rawIndex] ?? "")) {
+      rawIndex += 1;
+      continue;
+    }
+
+    if ("[]()".includes(source[rawIndex] ?? "")) {
+      rawIndex += 1;
+      continue;
+    }
+
+    visibleIndex += 1;
+    rawIndex += 1;
+  }
+
+  return Math.min(rawIndex, source.length);
+}
+
+function selectionForPreviewLine(line: string, root: HTMLElement, clientX: number, clientY: number): { start: number; end: number } {
+  const visibleOffset = visibleTextOffsetFromPoint(root, clientX, clientY);
+  if (visibleOffset === null) {
+    return {
+      start: line.length,
+      end: line.length,
+    };
+  }
+
+  const sourceColumn = sourceColumnFromVisibleOffset(line, visibleOffset);
+  return {
+    start: sourceColumn,
+    end: sourceColumn,
+  };
+}
+
+function summaryCaretColumn(line: string): number {
+  const match = line.match(/<summary\b[^>]*>/i);
+  if (!match) {
+    return 0;
+  }
+  return Math.min(line.length, (match.index ?? 0) + match[0].length);
+}
+
+function rangeIntersects(block: RenderBlock, startLine: number, endLine: number): boolean {
+  return block.endLine >= startLine && block.startLine <= endLine;
+}
+
+function expandRangeToBlockBoundaries(blocks: RenderBlock[], startLine: number, endLine: number) {
+  let next = normalizeLineRange(startLine, endLine);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (const block of blocks) {
+      if (!rangeIntersects(block, next.startLine, next.endLine)) {
+        continue;
+      }
+
+      if (block.type === "details" && (block.startLine < next.startLine || block.endLine > next.endLine)) {
+        next = {
+          startLine: Math.min(next.startLine, block.startLine),
+          endLine: Math.max(next.endLine, block.endLine),
+        };
+        changed = true;
+      }
+    }
+  }
+
+  return next;
+}
+
+function parseDetailsBlock(lines: string[], startLine: number, endLine: number): DetailsBlock {
+  const markdown = lineSpanText(lines, startLine, endLine);
+  const blockLines = lines.slice(startLine, endLine + 1);
+  const openTag = blockLines[0] ?? "";
+  const defaultOpen = /\bopen\b/i.test(openTag);
+
+  let summaryLine: number | null = null;
+  let summaryMarkdown = "Details";
+
+  for (let index = 0; index < blockLines.length; index += 1) {
+    const line = blockLines[index] ?? "";
+    if (!line.includes("<summary")) {
+      continue;
+    }
+
+    summaryLine = startLine + index;
+    summaryMarkdown = line
+      .replace(/^.*?<summary\b[^>]*>/i, "")
+      .replace(/<\/summary>.*$/i, "")
+      .trim();
+    break;
+  }
+
+  const bodyStartLine = summaryLine === null ? startLine + 1 : summaryLine + 1;
+  const bodyLines = lines.slice(bodyStartLine, endLine);
+
+  return {
+    type: "details",
+    id: `details-${startLine}-${endLine}`,
+    startLine,
+    endLine,
+    markdown,
+    summaryLine,
+    summaryMarkdown,
+    bodyMarkdown: bodyLines.join("\n"),
+    defaultOpen,
+  };
+}
+
+function buildRenderBlocks(lines: string[]): RenderBlock[] {
   const blocks: RenderBlock[] = [];
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -65,38 +290,102 @@ function buildRenderBlocks(lines: string[], activeLine: number, focused: boolean
     const trimmed = line.trim();
 
     if (trimmed.startsWith("<details")) {
-      const end = findDetailsBlockEnd(lines, index);
-      if (end !== null) {
-        const activeInside = focused && activeLine >= index && activeLine <= end;
-        if (!activeInside) {
-          blocks.push({
-            type: "details",
-            start: index,
-            end,
-            markdown: lines.slice(index, end + 1).join("\n"),
-          });
-          index = end;
-          continue;
-        }
+      const endLine = findDetailsBlockEnd(lines, index);
+      if (endLine !== null) {
+        blocks.push(parseDetailsBlock(lines, index, endLine));
+        index = endLine;
+        continue;
       }
     }
 
     blocks.push({
       type: "line",
-      index,
-      line,
+      id: `line-${index}`,
+      startLine: index,
+      endLine: index,
+      markdown: line,
     });
   }
 
   return blocks;
 }
 
-function shouldEnterEditMode(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) {
+function shouldLetPreviewInteractionPass(event: MouseEvent | React.MouseEvent<HTMLElement>): boolean {
+  if (!(event.target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (event.target.closest("[data-editor-preview-control='true']")) {
     return true;
   }
 
-  return !target.closest("a, button, input, textarea, select, summary");
+  if (event.target.closest("a")) {
+    return event.metaKey || event.ctrlKey;
+  }
+
+  return false;
+}
+
+function DetailsPreviewBlock({
+  block,
+  open,
+  selected,
+  onBodyMouseDown,
+  onBodyMouseEnter,
+  onPreviewClickCapture,
+  onToggleOpen,
+}: {
+  block: DetailsBlock;
+  open: boolean;
+  selected: boolean;
+  onBodyMouseDown: (event: React.MouseEvent<HTMLDivElement>) => void;
+  onBodyMouseEnter: () => void;
+  onPreviewClickCapture: (event: React.MouseEvent<HTMLDivElement>) => void;
+  onToggleOpen: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-2xl border border-stone-800/90 bg-stone-950/60 px-4 py-3 transition-colors",
+        selected && "border-amber-300/40 bg-stone-900/85",
+      )}
+      onMouseDown={onBodyMouseDown}
+      onMouseEnter={onBodyMouseEnter}
+      onClickCapture={onPreviewClickCapture}
+    >
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          data-editor-preview-control="true"
+          className="mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-lg text-stone-500 transition-colors hover:bg-stone-900 hover:text-stone-200"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggleOpen();
+          }}
+          aria-label={open ? "Collapse details" : "Expand details"}
+        >
+          <ChevronRight className={cn("size-4 transition-transform duration-150", open && "rotate-90 text-amber-200")} />
+        </button>
+
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-stone-100">
+            <MarkdownLine markdown={block.summaryMarkdown || "Details"} placeholder="Details" />
+          </div>
+
+          {open && block.bodyMarkdown.trim() ? (
+            <div className="mt-3 border-t border-stone-800/80 pt-3">
+              <MarkdownPreview markdown={block.bodyMarkdown} />
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function HybridMarkdownEditor({
@@ -104,28 +393,43 @@ export function HybridMarkdownEditor({
   onChange,
   placeholder = "# Start writing...",
 }: HybridMarkdownEditorProps) {
-  const [activeLine, setActiveLine] = useState(0);
-  const [preferredColumn, setPreferredColumn] = useState(0);
-  const [focused, setFocused] = useState(false);
-  const [documentMode, setDocumentMode] = useState(false);
+  const [activeEditSpan, setActiveEditSpan] = useState<ActiveEditSpan | null>(null);
+  const [previewDrag, setPreviewDrag] = useState<PreviewDrag | null>(null);
+  const [openDetailsBlocks, setOpenDetailsBlocks] = useState<Record<string, boolean>>({});
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const documentInputRef = useRef<HTMLTextAreaElement | null>(null);
-  const lineSelectionRef = useRef({ start: 0, end: 0 });
-  const documentSelectionRef = useRef({ start: 0, end: 0 });
   const lines = splitLines(value);
+  const blocks = useMemo(() => buildRenderBlocks(lines), [lines]);
   const isDocumentEmpty = value.trim().length === 0;
-  const renderBlocks = buildRenderBlocks(lines, activeLine, focused);
-  const activeLineValue = lines[activeLine] ?? "";
+
+  const previewSelectionRange = previewDrag
+    ? expandRangeToBlockBoundaries(blocks, previewDrag.anchorLine, previewDrag.currentLine)
+    : null;
 
   useEffect(() => {
-    if (activeLine > lines.length - 1) {
-      setActiveLine(Math.max(0, lines.length - 1));
+    if (!activeEditSpan) {
+      return;
     }
-  }, [activeLine, lines.length]);
+
+    const maxLine = Math.max(0, lines.length - 1);
+    const nextStartLine = Math.min(activeEditSpan.startLine, maxLine);
+    const nextEndLine = Math.min(activeEditSpan.endLine, maxLine);
+
+    if (nextStartLine === activeEditSpan.startLine && nextEndLine === activeEditSpan.endLine) {
+      return;
+    }
+
+    const nextValue = lineSpanText(lines, nextStartLine, nextEndLine);
+    setActiveEditSpan({
+      startLine: nextStartLine,
+      endLine: nextEndLine,
+      selectionStart: Math.min(activeEditSpan.selectionStart, nextValue.length),
+      selectionEnd: Math.min(activeEditSpan.selectionEnd, nextValue.length),
+    });
+  }, [activeEditSpan, lines]);
 
   useEffect(() => {
     const input = inputRef.current;
-    if (!focused || documentMode || !input) {
+    if (!input || !activeEditSpan) {
       return;
     }
 
@@ -133,281 +437,286 @@ export function HybridMarkdownEditor({
     input.style.height = `${Math.max(44, input.scrollHeight)}px`;
     input.focus();
 
-    const start = Math.min(lineSelectionRef.current.start, activeLineValue.length);
-    const end = Math.min(lineSelectionRef.current.end, activeLineValue.length);
+    const start = Math.min(activeEditSpan.selectionStart, input.value.length);
+    const end = Math.min(activeEditSpan.selectionEnd, input.value.length);
     input.setSelectionRange(start, end);
-  }, [activeLine, activeLineValue, documentMode, focused]);
+  }, [activeEditSpan, value]);
 
   useEffect(() => {
-    const input = documentInputRef.current;
-    if (!documentMode || !input) {
+    if (!previewDrag) {
       return;
     }
 
-    input.style.height = "0px";
-    input.style.height = `${Math.max(44, input.scrollHeight)}px`;
-    input.focus();
+    const { anchorLine, currentLine, selectionStart, selectionEnd } = previewDrag;
 
-    const start = Math.min(documentSelectionRef.current.start, value.length);
-    const end = Math.min(documentSelectionRef.current.end, value.length);
-    input.setSelectionRange(start, end);
-  }, [documentMode, value]);
+    function handleWindowMouseUp() {
+      const rawRange = normalizeLineRange(anchorLine, currentLine);
+      const expandedRange = expandRangeToBlockBoundaries(blocks, anchorLine, currentLine);
+      activateEditSpan(expandedRange.startLine, expandedRange.endLine, {
+        selectAll: rawRange.startLine !== rawRange.endLine,
+        selectionStart,
+        selectionEnd,
+      });
+      setPreviewDrag(null);
+    }
 
-  function updateValue(nextLines: string[], nextActiveLine = activeLine, nextColumn = preferredColumn) {
+    window.addEventListener("mouseup", handleWindowMouseUp);
+
+    return () => {
+      window.removeEventListener("mouseup", handleWindowMouseUp);
+    };
+  }, [blocks, previewDrag, value]);
+
+  function updateActiveSpan(nextText: string, selectionStart: number, selectionEnd: number) {
+    if (!activeEditSpan) {
+      return;
+    }
+
+    const nextParts = splitLines(nextText);
+    const nextLines = [...lines];
+    nextLines.splice(activeEditSpan.startLine, activeEditSpan.endLine - activeEditSpan.startLine + 1, ...nextParts);
     onChange(nextLines.join("\n"));
-    setActiveLine(nextActiveLine);
-    setPreferredColumn(nextColumn);
+    setActiveEditSpan({
+      startLine: activeEditSpan.startLine,
+      endLine: activeEditSpan.startLine + nextParts.length - 1,
+      selectionStart,
+      selectionEnd,
+    });
   }
 
-  function focusLine(index: number, column = lines[index]?.length ?? 0) {
-    lineSelectionRef.current = { start: column, end: column };
-    setActiveLine(index);
-    setPreferredColumn(column);
-    setDocumentMode(false);
-    setFocused(true);
+  function defaultSelectionForRange(startLine: number, endLine: number): { selectionStart: number; selectionEnd: number } {
+    if (startLine !== endLine) {
+      const selectedText = lineSpanText(lines, startLine, endLine);
+      return {
+        selectionStart: 0,
+        selectionEnd: selectedText.length,
+      };
+    }
+
+    const block = blocks.find((item) => item.startLine <= startLine && item.endLine >= endLine);
+    if (block?.type === "details") {
+      const summaryLine = block.summaryLine ?? block.startLine;
+      const column = summaryLine === block.summaryLine ? summaryCaretColumn(lines[summaryLine] ?? "") : 0;
+      const offset = lineOffsetWithinSpan(lines, block.startLine, summaryLine, column);
+      return { selectionStart: offset, selectionEnd: offset };
+    }
+
+    const lineLength = (lines[endLine] ?? "").length;
+    return { selectionStart: lineLength, selectionEnd: lineLength };
   }
 
-  function setLineSelection(start: number, end = start) {
-    lineSelectionRef.current = { start, end };
-    setPreferredColumn(start);
+  function activateEditSpan(
+    startLine: number,
+    endLine: number,
+    options?: {
+      selectAll?: boolean;
+      selectionStart?: number;
+      selectionEnd?: number;
+    },
+  ) {
+    const expandedRange = expandRangeToBlockBoundaries(blocks, startLine, endLine);
+    const spanText = lineSpanText(lines, expandedRange.startLine, expandedRange.endLine);
+    const fallbackSelection = defaultSelectionForRange(expandedRange.startLine, expandedRange.endLine);
+
+    setActiveEditSpan({
+      startLine: expandedRange.startLine,
+      endLine: expandedRange.endLine,
+      selectionStart: options?.selectAll ? 0 : Math.min(options?.selectionStart ?? fallbackSelection.selectionStart, spanText.length),
+      selectionEnd: options?.selectAll ? spanText.length : Math.min(options?.selectionEnd ?? fallbackSelection.selectionEnd, spanText.length),
+    });
   }
 
-  function enterDocumentMode(selectionStart: number, selectionEnd: number) {
-    documentSelectionRef.current = { start: selectionStart, end: selectionEnd };
-    setDocumentMode(true);
-    setFocused(true);
-  }
-
-  function syncCursorFromDocument(nextValue: string, selectionStart: number) {
-    const cursor = offsetToLineColumn(nextValue, selectionStart);
-    lineSelectionRef.current = { start: cursor.column, end: cursor.column };
-    setActiveLine(cursor.line);
-    setPreferredColumn(cursor.column);
-  }
-
-  function insertText(text: string, selectionStart: number, selectionEnd: number) {
-    const currentLine = lines[activeLine] ?? "";
-    const before = currentLine.slice(0, selectionStart);
-    const after = currentLine.slice(selectionEnd);
-    const nextParts = text.replace(/\r\n/g, "\n").split("\n");
-
-    if (nextParts.length === 1) {
-      updateValue(
-        replaceActiveLine(lines, activeLine, `${before}${text}${after}`),
-        activeLine,
-        before.length + text.length,
-      );
+  function handlePreviewMouseDown(
+    event: React.MouseEvent<HTMLDivElement>,
+    block: RenderBlock,
+    lineHint = block.startLine,
+  ) {
+    if (event.button !== 0 || shouldLetPreviewInteractionPass(event)) {
       return;
     }
 
-    const inserted = [...lines];
-    inserted.splice(
-      activeLine,
-      1,
-      `${before}${nextParts[0]}`,
-      ...nextParts.slice(1, -1),
-      `${nextParts[nextParts.length - 1]}${after}`,
-    );
-    updateValue(inserted, activeLine + nextParts.length - 1, nextParts[nextParts.length - 1].length);
+    event.preventDefault();
+    const anchorLine = block.type === "details" ? block.startLine : lineHint;
+    const nextSelection =
+      block.type === "line"
+        ? selectionForPreviewLine(block.markdown, event.currentTarget, event.clientX, event.clientY)
+        : undefined;
+
+    setPreviewDrag({
+      anchorLine,
+      currentLine: anchorLine,
+      selectionStart: nextSelection?.start,
+      selectionEnd: nextSelection?.end,
+    });
   }
+
+  function handlePreviewClickCapture(event: React.MouseEvent<HTMLDivElement>) {
+    if (shouldLetPreviewInteractionPass(event)) {
+      return;
+    }
+
+    if (event.target instanceof HTMLElement && event.target.closest("a")) {
+      event.preventDefault();
+    }
+  }
+
+  function updatePreviewDrag(nextLine: number) {
+    setPreviewDrag((current) => (current ? { ...current, currentLine: nextLine } : current));
+  }
+
+  const activeText = activeEditSpan ? lineSpanText(lines, activeEditSpan.startLine, activeEditSpan.endLine) : "";
 
   return (
     <div
       className="min-h-[60vh] cursor-text px-1 py-2"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          event.preventDefault();
-          focusLine(Math.max(0, lines.length - 1));
+        if (event.target !== event.currentTarget) {
+          return;
         }
+
+        event.preventDefault();
+        activateEditSpan(Math.max(0, lines.length - 1), Math.max(0, lines.length - 1));
       }}
     >
-      {documentMode ? (
-        <textarea
-          ref={documentInputRef}
-          rows={Math.max(lines.length, 1)}
-          className="block min-h-[60vh] w-full resize-none border-0 bg-transparent px-3 py-0.5 text-[15px] leading-7 text-stone-100 outline-none placeholder:text-stone-500"
-          value={value}
-          spellCheck={false}
-          placeholder={placeholder}
-          onBlur={(event) => {
-            const { selectionStart, selectionEnd } = event.currentTarget;
-            documentSelectionRef.current = { start: selectionStart, end: selectionEnd };
-            if (selectionStart !== selectionEnd) {
-              return;
-            }
-            setDocumentMode(false);
-            setFocused(false);
-          }}
-          onSelect={(event) => {
-            const { selectionStart, selectionEnd } = event.currentTarget;
-            documentSelectionRef.current = { start: selectionStart, end: selectionEnd };
-            syncCursorFromDocument(event.currentTarget.value, selectionStart);
-          }}
-          onChange={(event) => {
-            const { selectionStart, selectionEnd, value: nextValue } = event.currentTarget;
-            documentSelectionRef.current = { start: selectionStart, end: selectionEnd };
-            syncCursorFromDocument(nextValue, selectionStart);
-            onChange(nextValue);
-            if (selectionStart === selectionEnd) {
-              setDocumentMode(false);
-            }
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              event.preventDefault();
-              setDocumentMode(false);
-            }
-          }}
-        />
-      ) : (
-        renderBlocks.map((block) => {
-          if (block.type === "details") {
-            return (
-              <div
-                key={`details-${block.start}-${block.end}`}
-                className="block w-full cursor-text select-text px-3 py-1 text-left text-inherit"
-                onMouseUp={(event) => {
-                  const selection = window.getSelection();
-                  if (!selection?.isCollapsed || !shouldEnterEditMode(event.target)) {
+      {blocks.map((block) => {
+        const isBeforeActive = activeEditSpan ? block.endLine < activeEditSpan.startLine : true;
+        const isAfterActive = activeEditSpan ? block.startLine > activeEditSpan.endLine : true;
+        const isInsideActive = activeEditSpan ? rangeIntersects(block, activeEditSpan.startLine, activeEditSpan.endLine) : false;
+        const isPreviewSelected = previewSelectionRange
+          ? rangeIntersects(block, previewSelectionRange.startLine, previewSelectionRange.endLine)
+          : false;
+
+        if (activeEditSpan && isInsideActive && block.startLine === activeEditSpan.startLine) {
+          return (
+            <div key={`editor-${activeEditSpan.startLine}-${activeEditSpan.endLine}`} className="px-3 py-0.5">
+              <textarea
+                ref={inputRef}
+                rows={Math.max(activeEditSpan.endLine - activeEditSpan.startLine + 1, 1)}
+                className="block min-h-[1.75rem] w-full resize-none border-0 bg-transparent p-0 text-[15px] leading-7 text-stone-100 outline-none placeholder:text-stone-500"
+                value={activeText}
+                spellCheck={false}
+                placeholder={placeholder}
+                onBlur={() => {
+                  setActiveEditSpan(null);
+                }}
+                onSelect={(event) => {
+                  const { selectionStart, selectionEnd } = event.currentTarget;
+                  setActiveEditSpan((current) =>
+                    current
+                      ? {
+                          ...current,
+                          selectionStart,
+                          selectionEnd,
+                        }
+                      : current,
+                  );
+                }}
+                onChange={(event) => {
+                  const { value: nextValue, selectionStart, selectionEnd } = event.currentTarget;
+                  updateActiveSpan(nextValue, selectionStart, selectionEnd);
+                }}
+                onKeyDown={(event) => {
+                  const { selectionStart, selectionEnd, value: currentValue } = event.currentTarget;
+
+                  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+                    event.preventDefault();
+                    setActiveEditSpan({
+                      startLine: 0,
+                      endLine: Math.max(0, lines.length - 1),
+                      selectionStart: 0,
+                      selectionEnd: value.length,
+                    });
                     return;
                   }
-                  focusLine(block.start);
-                }}
-              >
-                <MarkdownPreview markdown={block.markdown} />
-              </div>
-            );
-          }
 
-          const { index, line } = block;
-          const isActive = focused && index === activeLine;
-          const isBlank = line.trim().length === 0;
-          const showEmptyPlaceholder = isBlank && isDocumentEmpty && index === 0 && !focused;
-
-          return (
-            <div
-              key={`${index}-${line}`}
-              className={cn(
-                "min-h-7 px-3 py-0.5 text-[15px] leading-7 transition-colors duration-100",
-                isActive && "text-stone-100",
-              )}
-            >
-              {isActive ? (
-                <textarea
-                  ref={inputRef}
-                  rows={1}
-                  className="block min-h-[1.75rem] w-full resize-none border-0 bg-transparent p-0 text-[15px] leading-7 text-stone-100 outline-none placeholder:text-stone-500"
-                  value={line}
-                  spellCheck={false}
-                  placeholder={placeholder}
-                  onBlur={() => {
-                    setFocused(false);
-                  }}
-                  onSelect={(event) => {
-                    setLineSelection(event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
-                  }}
-                  onChange={(event) => {
-                    setLineSelection(event.target.selectionStart, event.target.selectionEnd);
-                    updateValue(
-                      replaceActiveLine(lines, activeLine, event.target.value),
-                      activeLine,
-                      event.target.selectionStart,
-                    );
-                  }}
-                  onPaste={(event) => {
+                  if (event.key === "Tab") {
                     event.preventDefault();
-                    insertText(
-                      event.clipboardData.getData("text/plain"),
-                      event.currentTarget.selectionStart,
-                      event.currentTarget.selectionEnd,
-                    );
-                  }}
-                  onKeyDown={(event) => {
-                    const { selectionStart, selectionEnd, value: currentLineValue } = event.currentTarget;
+                    const nextValue = `${currentValue.slice(0, selectionStart)}  ${currentValue.slice(selectionEnd)}`;
+                    const nextSelection = selectionStart + 2;
+                    updateActiveSpan(nextValue, nextSelection, nextSelection);
+                    return;
+                  }
 
-                    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
-                      event.preventDefault();
-                      enterDocumentMode(0, value.length);
-                      return;
-                    }
+                  if (
+                    event.key === "ArrowUp" &&
+                    selectionStart === selectionEnd &&
+                    selectionStart === 0 &&
+                    activeEditSpan.startLine > 0
+                  ) {
+                    event.preventDefault();
+                    activateEditSpan(activeEditSpan.startLine - 1, activeEditSpan.startLine - 1);
+                    return;
+                  }
 
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      const before = currentLineValue.slice(0, selectionStart);
-                      const after = currentLineValue.slice(selectionEnd);
-                      const nextLines = [...lines];
-                      nextLines.splice(activeLine, 1, before, after);
-                      updateValue(nextLines, activeLine + 1, 0);
-                      return;
-                    }
-
-                    if (event.key === "Tab") {
-                      event.preventDefault();
-                      insertText("  ", selectionStart, selectionEnd);
-                      return;
-                    }
-
-                    if (event.key === "ArrowUp") {
-                      event.preventDefault();
-                      focusLine(Math.max(0, activeLine - 1), selectionStart);
-                      return;
-                    }
-
-                    if (event.key === "ArrowDown") {
-                      event.preventDefault();
-                      focusLine(Math.min(lines.length - 1, activeLine + 1), selectionStart);
-                      return;
-                    }
-
-                    if (event.key === "Backspace" && selectionStart === selectionEnd && selectionStart === 0 && activeLine > 0) {
-                      event.preventDefault();
-                      const previous = lines[activeLine - 1] ?? "";
-                      const nextLines = [...lines];
-                      nextLines.splice(activeLine - 1, 2, `${previous}${currentLineValue}`);
-                      setLineSelection(previous.length);
-                      updateValue(nextLines, activeLine - 1, previous.length);
-                      return;
-                    }
-
-                    if (
-                      event.key === "Delete" &&
-                      selectionStart === selectionEnd &&
-                      selectionStart === currentLineValue.length &&
-                      activeLine < lines.length - 1
-                    ) {
-                      event.preventDefault();
-                      const following = lines[activeLine + 1] ?? "";
-                      const nextLines = [...lines];
-                      nextLines.splice(activeLine, 2, `${currentLineValue}${following}`);
-                      setLineSelection(currentLineValue.length);
-                      updateValue(nextLines, activeLine, currentLineValue.length);
-                    }
-                  }}
-                />
-              ) : (
-                <div
-                  className="block w-full cursor-text select-text p-0 text-left text-inherit"
-                  onMouseUp={(event) => {
-                    const selection = window.getSelection();
-                    if (!selection?.isCollapsed || !shouldEnterEditMode(event.target)) {
-                      return;
-                    }
-                    focusLine(index);
-                  }}
-                >
-                  {showEmptyPlaceholder ? (
-                    <span className="text-sm text-stone-500/80">{placeholder}</span>
-                  ) : isBlank ? (
-                    <span className="block min-h-[1.75rem]">&nbsp;</span>
-                  ) : (
-                    <MarkdownLine markdown={line} />
-                  )}
-                </div>
-              )}
+                  if (
+                    event.key === "ArrowDown" &&
+                    selectionStart === selectionEnd &&
+                    selectionEnd === currentValue.length &&
+                    activeEditSpan.endLine < lines.length - 1
+                  ) {
+                    event.preventDefault();
+                    activateEditSpan(activeEditSpan.endLine + 1, activeEditSpan.endLine + 1, {
+                      selectionStart: 0,
+                      selectionEnd: 0,
+                    });
+                  }
+                }}
+              />
             </div>
           );
-        })
-      )}
+        }
+
+        if (activeEditSpan && !isBeforeActive && !isAfterActive) {
+          return null;
+        }
+
+        if (block.type === "details") {
+          const open = openDetailsBlocks[block.id] ?? block.defaultOpen;
+
+          return (
+            <div key={block.id} className="px-3 py-1">
+              <DetailsPreviewBlock
+                block={block}
+                open={open}
+                selected={isPreviewSelected}
+                onBodyMouseDown={(event) => handlePreviewMouseDown(event, block)}
+                onBodyMouseEnter={() => updatePreviewDrag(block.endLine)}
+                onPreviewClickCapture={handlePreviewClickCapture}
+                onToggleOpen={() => {
+                  setOpenDetailsBlocks((current) => ({
+                    ...current,
+                    [block.id]: !open,
+                  }));
+                }}
+              />
+            </div>
+          );
+        }
+
+        const showEmptyPlaceholder = isDocumentEmpty && block.startLine === 0 && !activeEditSpan;
+        const isBlank = block.markdown.trim().length === 0;
+
+        return (
+          <div
+            key={block.id}
+            className={cn(
+              "min-h-7 px-3 py-0.5 text-[15px] leading-7 transition-colors duration-100",
+              isPreviewSelected && "rounded-lg bg-stone-900/85",
+            )}
+            onMouseDown={(event) => handlePreviewMouseDown(event, block, block.startLine)}
+            onMouseEnter={() => updatePreviewDrag(block.startLine)}
+            onClickCapture={handlePreviewClickCapture}
+          >
+            {showEmptyPlaceholder ? (
+              <span className="text-sm text-stone-500/80">{placeholder}</span>
+            ) : isBlank ? (
+              <span className="block min-h-[1.75rem]">&nbsp;</span>
+            ) : (
+              <MarkdownLine markdown={block.markdown} />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

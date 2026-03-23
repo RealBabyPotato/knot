@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type SetStateAction } from "react";
 import {
     createNote,
     deleteNote,
@@ -289,6 +289,28 @@ export function App() {
     const [isRenamingTitle, setIsRenamingTitle] = useState(false);
     const [pendingTitle, setPendingTitle] = useState("");
     const titleInputRef = useRef<HTMLInputElement | null>(null);
+    const draftRef = useRef(draft);
+    const selectedPathRef = useRef(selectedPath);
+
+    function setDraftState(nextValue: SetStateAction<NoteDocument>) {
+        setDraft((current) => {
+            const nextDraft =
+                typeof nextValue === "function"
+                    ? (nextValue as (value: NoteDocument) => NoteDocument)(current)
+                    : nextValue;
+            draftRef.current = nextDraft;
+            return nextDraft;
+        });
+    }
+
+    function setSelectedPathState(nextValue: SetStateAction<string>) {
+        setSelectedPath((current) => {
+            const nextPath =
+                typeof nextValue === "function" ? (nextValue as (value: string) => string)(current) : nextValue;
+            selectedPathRef.current = nextPath;
+            return nextPath;
+        });
+    }
 
     const query = search.trim().toLowerCase();
     const isDirty = draft.content !== originalContent || normalizePath(draft.path) !== selectedPath;
@@ -359,9 +381,9 @@ export function App() {
         setLoadingNote(true);
         try {
             const note = await getNote(path);
-            setSelectedPath(note.path);
+            setSelectedPathState(note.path);
             setSelectedFolder(folderFromPath(note.path));
-            setDraft(note);
+            setDraftState(note);
             setOriginalContent(note.content);
             setStatusMessage("");
         } catch (error) {
@@ -381,7 +403,7 @@ export function App() {
 
     function updateDraftPath(nextPath: string, options?: { title?: string }) {
         const normalized = normalizePath(nextPath);
-        setDraft((current) => ({
+        setDraftState((current) => ({
             ...current,
             path: normalized,
             title: options?.title ?? noteTitleFromPath(normalized),
@@ -423,8 +445,8 @@ export function App() {
 
         try {
             const moved = await moveNote(selectedPath, normalizePath(nextPath));
-            setSelectedPath(moved.path);
-            setDraft((current) => ({
+            setSelectedPathState(moved.path);
+            setDraftState((current) => ({
                 ...current,
                 path: moved.path,
                 title: noteTitleFromPath(moved.path),
@@ -452,9 +474,9 @@ export function App() {
         }
 
         const next = newNoteForFolder(folderPath);
-        setSelectedPath("");
+        setSelectedPathState("");
         setSelectedFolder(folderFromPath(next.path));
-        setDraft(next);
+        setDraftState(next);
         setOriginalContent(next.content);
         ensureFolderExpanded(folderFromPath(next.path));
         setStatusMessage("New note created");
@@ -463,13 +485,15 @@ export function App() {
     async function persistPathIfNeeded(targetPath: string): Promise<string> {
         const normalized = normalizePath(targetPath);
 
-        if (!selectedPath || selectedPath === normalized) {
+        const currentSelectedPath = selectedPathRef.current;
+
+        if (!currentSelectedPath || currentSelectedPath === normalized) {
             return normalized;
         }
 
-        const moved = await moveNote(selectedPath, normalized);
-        setSelectedPath(moved.path);
-        setDraft((current) => ({
+        const moved = await moveNote(currentSelectedPath, normalized);
+        setSelectedPathState(moved.path);
+        setDraftState((current) => ({
             ...current,
             path: moved.path,
             title: noteTitleFromPath(moved.path),
@@ -480,6 +504,10 @@ export function App() {
     }
 
     async function handleSave() {
+        if (saving || loadingNote) {
+            return;
+        }
+
         setSaving(true);
         try {
             await persistDraft();
@@ -492,19 +520,50 @@ export function App() {
         }
     }
 
+    useEffect(() => {
+        function handleKeyUp(event: KeyboardEvent) {
+            if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") {
+                return;
+            }
+
+            event.preventDefault();
+
+            if (saving || loadingNote) {
+                return;
+            }
+
+            handleSave();
+        }
+
+        function preventBrowserSave(event: KeyboardEvent) {
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+                event.preventDefault();
+            }
+        }
+
+        window.addEventListener("keydown", preventBrowserSave);
+        window.addEventListener("keyup", handleKeyUp);
+        return () => {
+            window.removeEventListener("keydown", preventBrowserSave);
+            window.removeEventListener("keyup", handleKeyUp);
+        };
+    }, [loadingNote, saving]);
+
     async function persistDraft(): Promise<NoteDocument> {
-        const hadSavedPath = Boolean(selectedPath);
-        const normalizedPath = normalizePath(draft.path);
+        const currentDraft = draftRef.current;
+        const currentSelectedPath = selectedPathRef.current;
+        const hadSavedPath = Boolean(currentSelectedPath);
+        const normalizedPath = normalizePath(currentDraft.path);
         const persistedPath = hadSavedPath ? await persistPathIfNeeded(normalizedPath) : normalizedPath;
         const payload = {
             path: persistedPath,
             title: noteTitleFromPath(persistedPath),
-            content: draft.content,
+            content: currentDraft.content,
         };
         const saved = hadSavedPath ? await saveNote(payload) : await createNote(payload);
-        setDraft(saved);
+        setDraftState(saved);
         setOriginalContent(saved.content);
-        setSelectedPath(saved.path);
+        setSelectedPathState(saved.path);
         setSelectedFolder(folderFromPath(saved.path));
         ensureFolderExpanded(folderFromPath(saved.path));
         return saved;
@@ -534,14 +593,14 @@ export function App() {
             const response = await runKnot(payload);
             const nextPath = normalizePath(response.notePath ?? response.path ?? payload.path);
             const nextContent = response.content ?? sourceDocument.content;
-            setDraft({
+            setDraftState({
                 path: nextPath,
                 title: noteTitleFromPath(nextPath),
                 content: nextContent,
                 updatedAt: response.updatedAt,
             });
             setOriginalContent(nextContent);
-            setSelectedPath(nextPath);
+            setSelectedPathState(nextPath);
             setSelectedFolder(folderFromPath(nextPath));
             ensureFolderExpanded(folderFromPath(nextPath));
             setStatusMessage(response.status ?? "Processed");
@@ -566,9 +625,9 @@ export function App() {
                 if (remaining.length > 0) {
                     await openNote(remaining[0].path, { skipDirtyCheck: true });
                 } else {
-                    setSelectedPath("");
+                    setSelectedPathState("");
                     setSelectedFolder("");
-                    setDraft(EMPTY_NOTE);
+                    setDraftState(EMPTY_NOTE);
                     setOriginalContent(EMPTY_NOTE.content);
                 }
             }
@@ -611,7 +670,7 @@ export function App() {
 
     function treeButtonClass(active: boolean) {
         return cn(
-            "group flex w-full items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-left text-sm text-stone-300 transition-all duration-150 hover:border-stone-800 hover:bg-stone-900/70 hover:text-stone-100",
+            "group cursor-grab flex w-full items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-left text-sm text-stone-300 transition-all duration-150 hover:border-stone-800 hover:bg-stone-900/70 hover:text-stone-100",
             active && "border-amber-300/15 bg-stone-900 text-stone-50 shadow-[0_0_0_1px_rgba(245,158,11,0.12)]",
         );
     }
@@ -629,7 +688,7 @@ export function App() {
                         onClick={() => void openNote(note.path)}
                     >
                         <FileText className="size-4 shrink-0 text-stone-500 transition-colors group-hover:text-amber-300" />
-                        <span className="min-w-0 flex-1 truncate">{summarizeTitle(note)}</span>
+                        <span className="w-1 flex-1 truncate">{summarizeTitle(note)}</span>
                     </button>
                 ))}
 
@@ -844,7 +903,8 @@ export function App() {
                             <HybridMarkdownEditor
                                 value={draft.content}
                                 onChange={(nextValue) => {
-                                    setDraft((current) => ({ ...current, content: nextValue }));
+                                    draftRef.current = { ...draftRef.current, content: nextValue };
+                                    setDraftState((current) => ({ ...current, content: nextValue }));
                                 }}
                             />
                         </div>
